@@ -54,6 +54,24 @@ def mask_geometry(mask: np.ndarray) -> tuple[list[float], float]:
     return [float(x0), float(y0), float(x1 - x0 + 1), float(y1 - y0 + 1)], float(mask.sum())
 
 
+def mask_annotation_geometry(mask: np.ndarray) -> tuple[list[list[float]], list[float], float]:
+    """Calculate COCO polygons, bounding box, and pixel area in one full-mask scan."""
+    bitmap = np.asarray(mask, dtype=np.uint8)
+    points = cv2.findNonZero(bitmap)
+    if points is None:
+        return [], [0.0, 0.0, 0.0, 0.0], 0.0
+    x, y, width, height = cv2.boundingRect(points)
+    crop = bitmap[y:y + height, x:x + width]
+    contours, _ = cv2.findContours(crop, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE, offset=(x, y))
+    polygons = []
+    for contour in contours:
+        if len(contour) >= 3 and cv2.contourArea(contour) >= 1:
+            polygon = contour.reshape(-1, 2).astype(float).ravel().tolist()
+            if len(polygon) >= 6:
+                polygons.append(polygon)
+    return polygons, [float(x), float(y), float(width), float(height)], float(len(points))
+
+
 class CocoProject:
     def __init__(self):
         self.root: Path | None = None
@@ -259,10 +277,16 @@ class CocoProject:
         saved = []
         for item in masks:
             mask = item["mask"].astype(bool)
-            polygons = mask_to_polygons(mask)
-            bbox, area = mask_geometry(mask)
+            if item.get("segmentation") and not item.get("_geometry_dirty", False):
+                polygons = copy.deepcopy(item["segmentation"])
+                bbox = [float(value) for value in item.get("bbox", [0, 0, 0, 0])]
+                area = float(item.get("area", 0))
+            else:
+                polygons, bbox, area = mask_annotation_geometry(mask)
             if not polygons or area <= 0:
                 continue
+            item["segmentation"], item["bbox"], item["area"] = polygons, bbox, area
+            item["_geometry_dirty"] = False
             ann_id = int(item.get("id", 0))
             if ann_id <= 0 or ann_id in used:
                 ann_id, next_id = next_id, next_id + 1

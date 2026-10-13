@@ -163,7 +163,7 @@ class MainWindow(ChineseMainWindow):
             rgb=np.asarray(Image.open(path).convert("RGB")); rec=self.project.image_record(index)
             self.masks=self.project.masks_for(rec["id"],rgb.shape[1],rgb.shape[0]); self.undo_stack=[]; self.redo_stack=[]
             self.mask_prompt=None; self.mask_prompt_source=None; self.capture_mask_prompt=False; self.view.exemplar_mask=None; self.view.sam_box=None
-            self.view.set_image(rgb,self.masks); self.mask_prompt_status.setText("Instance Prompt: not set"); self.update_roi_status(); self.update_run_button(); self.refresh_masks(); self.counter.setText(f"{index+1}/{len(self.project.image_paths)}  {path.name}")
+            self.view.set_image(rgb,self.masks); self.current_masks_dirty=False; self.mask_prompt_status.setText("Instance Prompt: not set"); self.update_roi_status(); self.update_run_button(); self.refresh_masks(); self.counter.setText(f"{index+1}/{len(self.project.image_paths)}  {path.name}")
         except Exception as exc:self.error(exc)
 
     def apply_labels_to_selected(self):
@@ -183,7 +183,7 @@ class MainWindow(ChineseMainWindow):
 
     def save(self):
         if self.project.json_path is None:return
-        try:self.guard_save(); self.project.save(); self.update_image_status(self.index); self.statusBar().showMessage(f"Saved: {self.project.json_path}",5000)
+        try:self.commit_current(force=True); self.project.save(); self.update_image_status(self.index); self.statusBar().showMessage(f"Saved: {self.project.json_path}",5000)
         except Exception as exc:self.error(exc)
 
     def load_sam3(self):
@@ -422,7 +422,7 @@ class MainWindow(ChineseMainWindow):
         message=f"Merge {len(rows)} masks into one instance?\nThe first instance's Category {base.get('category_id',1)} | {category['name']} and noun phrase will be retained."
         if QMessageBox.question(self,"Confirm Instance Merge",message,QMessageBox.Yes|QMessageBox.No)!=QMessageBox.Yes:return
         import numpy as np
-        self.push_undo(); base["mask"]=np.logical_or.reduce([self.masks[i]["mask"] for i in rows]); self.masks[:]=[m for i,m in enumerate(self.masks) if i not in rows[1:]]; self.view.selected=rows[0]; self.view.redraw(); self.refresh_masks()
+        self.push_undo(); base["mask"]=np.logical_or.reduce([self.masks[i]["mask"] for i in rows]); base["_geometry_dirty"]=True; self.masks[:]=[m for i,m in enumerate(self.masks) if i not in rows[1:]]; self.view.selected=rows[0]; self.view.redraw(); self.refresh_masks()
 
     def error(self,exc):
         QMessageBox.critical(self,"Error",str(exc))

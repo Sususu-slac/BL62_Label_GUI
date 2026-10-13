@@ -510,7 +510,7 @@ class MainWindow(QMainWindow):
         icon_path=Path(__file__).with_name("BL62_Label.ico")
         if icon_path.is_file():self.setWindowIcon(QIcon(str(icon_path)))
         self.setAcceptDrops(True)
-        self.project=CocoProject(); self.index=-1; self.masks=[]; self.undo_stack=[]; self.redo_stack=[]; self.sam_busy=False; self.sam_loaded_flag=False
+        self.project=CocoProject(); self.index=-1; self.masks=[]; self.current_masks_dirty=False; self.undo_stack=[]; self.redo_stack=[]; self.sam_busy=False; self.sam_loaded_flag=False
         self.export_thread=None; self.export_worker=None; self.export_dialog=None
         self.prompt_mode="text"; self.mask_prompt=None; self.mask_prompt_source=None; self.capture_mask_prompt=False
         self.settings_path=Path(__file__).with_name("sam3_settings.json")
@@ -529,7 +529,7 @@ class MainWindow(QMainWindow):
         top.addStretch(); self.counter=QLabel("未打开项目"); top.addWidget(self.counter)
         split=QSplitter(); layout.addWidget(split,1)
         left=QWidget(); ll=QVBoxLayout(left); ll.addWidget(QLabel("图片（✓ 已审核，● 有标注）")); self.images=QListWidget(); self.images.setSelectionMode(QAbstractItemView.ExtendedSelection); self.images.setContextMenuPolicy(Qt.CustomContextMenu); self.images.customContextMenuRequested.connect(self.show_image_context_menu); self.images.currentRowChanged.connect(self.load_image); ll.addWidget(self.images); split.addWidget(left)
-        self.view=AnnotationView(); self.view.changed.connect(self.push_undo); self.view.selection_requested.connect(self.select_mask); self.view.masks_changed.connect(self.refresh_masks); self.view.instance_finished.connect(self.on_instance_finished); self.view.small_mask_finished.connect(self.confirm_small_mask); self.view.tool_reset_requested.connect(self.reset_tool); self.view.box_changed.connect(self.update_roi_status); self.view.status.connect(self.statusBar().showMessage); split.addWidget(self.view)
+        self.view=AnnotationView(); self.view.changed.connect(self.push_undo); self.view.changed.connect(self.mark_current_dirty); self.view.selection_requested.connect(self.select_mask); self.view.masks_changed.connect(self.refresh_masks); self.view.masks_changed.connect(self.mark_current_dirty); self.view.instance_finished.connect(self.on_instance_finished); self.view.small_mask_finished.connect(self.confirm_small_mask); self.view.tool_reset_requested.connect(self.reset_tool); self.view.box_changed.connect(self.update_roi_status); self.view.status.connect(self.statusBar().showMessage); split.addWidget(self.view)
         right=QWidget(); rl=QVBoxLayout(right)
         rl.addWidget(QLabel("SAM3 GPU 辅助标注")); self.repo_label=QLabel(); self.repo_label.setWordWrap(True); rl.addWidget(self.repo_label)
         choose_repo=QPushButton("选择 SAM3 仓库"); choose_repo.clicked.connect(self.choose_sam_repo); rl.addWidget(choose_repo)
@@ -776,6 +776,10 @@ class MainWindow(QMainWindow):
 
     def guard_save(self):
         if self.index>=0: self.commit_current()
+    def mark_current_dirty(self):
+        if self.index>=0:
+            self.current_masks_dirty=True
+            if 0<=self.view.selected<len(self.masks):self.masks[self.view.selected]["_geometry_dirty"]=True
     def new_project(self):
         self._choose_new_project(False)
     def _choose_new_project(self,english=False):
@@ -860,8 +864,9 @@ class MainWindow(QMainWindow):
             prefix=("✓ " if rec["id"] in self.project.reviewed else "  ")+("● " if rec["id"] in ann_ids else "○ ")
             self.images.addItem(prefix+path.name)
         self.images.blockSignals(False); self.refresh_categories(); self.images.setCurrentRow(0)
-    def commit_current(self):
-        rec=self.project.image_record(self.index); self.project.replace_masks(rec["id"],self.masks)
+    def commit_current(self,force=False):
+        if self.index<0 or (not force and not self.current_masks_dirty):return
+        rec=self.project.image_record(self.index); self.project.replace_masks(rec["id"],self.masks); self.current_masks_dirty=False
     def load_image(self,index):
         if index<0 or index>=len(self.project.image_paths):return
         if self.index>=0:self.commit_current()
@@ -870,7 +875,7 @@ class MainWindow(QMainWindow):
             rgb=np.asarray(Image.open(path).convert("RGB")); rec=self.project.image_record(index)
             self.masks=self.project.masks_for(rec["id"],rgb.shape[1],rgb.shape[0]); self.undo_stack=[]; self.redo_stack=[]
             self.mask_prompt=None; self.mask_prompt_source=None; self.capture_mask_prompt=False; self.view.exemplar_mask=None; self.view.sam_box=None
-            self.view.set_image(rgb,self.masks); self.mask_prompt_status.setText("Mask Prompt：尚未设置"); self.update_roi_status(); self.update_run_button(); self.refresh_masks(); self.counter.setText(f"{index+1}/{len(self.project.image_paths)}  {path.name}")
+            self.view.set_image(rgb,self.masks); self.current_masks_dirty=False; self.mask_prompt_status.setText("Mask Prompt：尚未设置"); self.update_roi_status(); self.update_run_button(); self.refresh_masks(); self.counter.setText(f"{index+1}/{len(self.project.image_paths)}  {path.name}")
         except Exception as e:self.error(e)
     def navigate(self,delta):
         if self.images.count():self.images.setCurrentRow(max(0,min(self.images.count()-1,self.index+delta)))
@@ -889,6 +894,7 @@ class MainWindow(QMainWindow):
         if combo_index>=0:self.category_combo.blockSignals(True); self.category_combo.setCurrentIndex(combo_index); self.category_combo.blockSignals(False)
         self.sync_drawing_defaults()
     def push_undo(self):
+        self.mark_current_dirty()
         self.undo_stack.append(self._mask_snapshot()); self.undo_stack=self.undo_stack[-50:]; self.redo_stack.clear()
     def _mask_snapshot(self):
         snapshot=[]
@@ -905,9 +911,11 @@ class MainWindow(QMainWindow):
         return restored
     def undo(self):
         if not self.undo_stack:return
+        self.mark_current_dirty()
         self.redo_stack.append(self._mask_snapshot()); self.masks[:]=self._restore_snapshot(self.undo_stack.pop()); self.view.masks=self.masks; self.view.selected=-1; self.view.redraw(); self.refresh_masks()
     def redo(self):
         if not self.redo_stack:return
+        self.mark_current_dirty()
         self.undo_stack.append(self._mask_snapshot()); self.masks[:]=self._restore_snapshot(self.redo_stack.pop()); self.view.masks=self.masks; self.view.selected=-1; self.view.redraw(); self.refresh_masks()
     def delete_mask(self):
         rows=sorted({item.row() for item in self.mask_list.selectedIndexes()},reverse=True)
@@ -923,7 +931,7 @@ class MainWindow(QMainWindow):
         base=self.masks[rows[0]]; category=self.project.category(int(base.get("category_id",1))) or {"name":"未知"}
         message=f"将 {len(rows)} 个 Masks 合并为一个实例。\n将保留第一个实例的 Category {base.get('category_id',1)} | {category['name']} 和 Noun phrase。\n是否继续？"
         if QMessageBox.question(self,"确认合并实例",message,QMessageBox.Yes|QMessageBox.No)!=QMessageBox.Yes:return
-        self.push_undo(); merged=np.logical_or.reduce([self.masks[i]["mask"] for i in rows]); base["mask"]=merged
+        self.push_undo(); merged=np.logical_or.reduce([self.masks[i]["mask"] for i in rows]); base["mask"]=merged; base["_geometry_dirty"]=True
         self.masks[:]=[m for i,m in enumerate(self.masks) if i not in rows[1:]]; self.view.selected=rows[0]; self.view.redraw(); self.refresh_masks()
     def toggle_review(self):
         if self.index<0:return
@@ -939,12 +947,12 @@ class MainWindow(QMainWindow):
         self.images.item(row).setText(prefix+path.name)
     def save(self):
         if self.project.json_path is None:return
-        try:self.guard_save(); self.project.save(); self.update_image_status(self.index); self.statusBar().showMessage(f"已保存：{self.project.json_path}",5000)
+        try:self.commit_current(force=True); self.project.save(); self.update_image_status(self.index); self.statusBar().showMessage(f"已保存：{self.project.json_path}",5000)
         except Exception as e:self.error(e)
     def export_all(self):
         if self.project.root is None:return
         if self.export_thread and self.export_thread.isRunning():QMessageBox.information(self,"Export","An export is already running.");return
-        try:self.guard_save();self.project.save()
+        try:self.commit_current(force=True);self.project.save()
         except Exception as exc:self.error(exc);return
         english=getattr(self,"ui_language","zh")=="en"
         chosen=QFileDialog.getExistingDirectory(self,"Select export directory" if english else "选择导出目录",str(self.project.root/"exports"))
