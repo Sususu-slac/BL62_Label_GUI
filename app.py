@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 from PIL import Image
 from PySide6.QtCore import QObject, QPointF, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QAction, QColor, QCursor, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import QAction, QColor, QCursor, QIcon, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QComboBox, QDialog, QFileDialog, QFormLayout,
     QGraphicsPathItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
     QMainWindow, QMenu, QMessageBox, QProgressDialog, QPushButton, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QToolBar,
@@ -507,6 +507,8 @@ class MainWindow(QMainWindow):
     predict_sam3_requested = Signal(object,str,float,object,str,object)
     def __init__(self):
         super().__init__(); self.ui_language=getattr(self,"ui_language","zh"); self.setWindowTitle("Particle Label GUI — 2026-08-25"); self.resize(1550,930); self.setStyleSheet(THEME_QSS)
+        icon_path=Path(__file__).with_name("BL62_Label.ico")
+        if icon_path.is_file():self.setWindowIcon(QIcon(str(icon_path)))
         self.setAcceptDrops(True)
         self.project=CocoProject(); self.index=-1; self.masks=[]; self.undo_stack=[]; self.redo_stack=[]; self.sam_busy=False; self.sam_loaded_flag=False
         self.export_thread=None; self.export_worker=None; self.export_dialog=None
