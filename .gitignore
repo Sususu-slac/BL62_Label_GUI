@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.pt
+*.pth
+*.ckpt
+sam3_settings.json
+install_log.txt
+test_outputs/
+exports/
+datasets/
+annotations.json
+project_state.json
+*.incomplete
+.idea/
+.vscode/
