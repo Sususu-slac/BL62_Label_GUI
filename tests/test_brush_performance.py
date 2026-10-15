@@ -28,6 +28,10 @@ class BrushPerformanceTest(unittest.TestCase):
  def test_show_hide_labels_preserves_masks(self):
   view=AnnotationView();image=np.zeros((256,256,3),np.uint8);masks=self.masks(12,256,256);original=[item['mask'].copy() for item in masks];view.set_image(image,masks);view.selected=0;view.redraw()
   self.assertTrue(view.overlay_item.isVisible());self.assertTrue(view.active_overlay_item.isVisible());view.set_labels_visible(False);self.assertFalse(view.overlay_item.isVisible());self.assertFalse(view.active_overlay_item.isVisible());self.assertTrue(all(np.array_equal(a,item['mask']) for a,item in zip(original,masks)));view.set_labels_visible(True);self.assertTrue(view.overlay_item.isVisible());self.assertTrue(view.active_overlay_item.isVisible())
+ def test_show_hide_labels_is_responsive(self):
+  view=AnnotationView();image=np.zeros((1024,1024,3),np.uint8);view.set_image(image,self.masks(100));view.selected=0;view.redraw();started=time.perf_counter()
+  for _ in range(50):view.set_labels_visible(False);view.set_labels_visible(True)
+  elapsed=time.perf_counter()-started;self.assertLess(elapsed,1.0,f'100 label visibility changes took {elapsed:.3f}s')
  def test_packed_undo_redo(self):
   window=MainWindow();window.masks=self.masks(20,256,256);window.view.masks=window.masks;original=window.masks[0]['mask'].copy();window.push_undo();window.masks[0]['mask'][100:110,100:110]=True;window.undo();self.assertTrue(np.array_equal(window.masks[0]['mask'],original));window.redo();self.assertTrue(window.masks[0]['mask'][105,105]);window.close()
  def test_export_contains_current_coco_json(self):

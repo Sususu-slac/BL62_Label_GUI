@@ -23,7 +23,7 @@ from sam3_setup import detect_checkpoint, detect_repository, diagnostic, save_se
 
 TRANSLATIONS = {
     "平移": "Pan", "选择": "Select", "多边形": "Polygon", "画笔": "Brush",
-    "橡皮擦": "Eraser", "SAM3框": "SAM3 Box", "显示标签": "Show Labels", "笔刷 ": " Brush size ",
+    "橡皮擦": "Eraser", "SAM3框": "SAM3 Box", "隐藏标签": "Hide Labels", "显示标签": "Show Labels", "笔刷 ": " Brush size ",
     "新建项目": "New Project", "导入已有项目": "Import Existing Project",
     "从项目移除": "Remove from Project",
     "保存 Ctrl+S": "Save  Ctrl+S", "上一张": "Previous", "下一张": "Next",

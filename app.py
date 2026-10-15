@@ -526,7 +526,7 @@ class MainWindow(QMainWindow):
         self.tool_actions={}; self.active_tool=None
         for text,mode,key in [("画笔","brush","B"),("多边形","polygon","P"),("橡皮擦","erase","E"),("选择","select","S"),("平移","pan","H"),("SAM3框","sam_box","G")]:
             act=QAction(text,self); act.setShortcut(key); act.setCheckable(True); act.triggered.connect(lambda _,m=mode:self.toggle_tool(m)); toolbar.addAction(act); self.tool_actions[mode]=act
-        toolbar.addSeparator(); self.show_labels_action=QAction("显示标签",self); self.show_labels_action.setShortcut("L"); self.show_labels_action.setCheckable(True); self.show_labels_action.setChecked(True); self.show_labels_action.triggered.connect(self.toggle_label_visibility); toolbar.addAction(self.show_labels_action)
+        toolbar.addSeparator(); self.show_labels_action=QAction("隐藏标签",self); self.show_labels_action.setShortcut("L"); self.show_labels_action.setCheckable(True); self.show_labels_action.setChecked(True); self.show_labels_action.triggered.connect(self.toggle_label_visibility); toolbar.addAction(self.show_labels_action)
         toolbar.addSeparator(); toolbar.addWidget(QLabel("笔刷 ")); size=QSpinBox(); size.setRange(1,300); size.setValue(20); size.valueChanged.connect(lambda value:self.view.set_brush_size(value)); toolbar.addWidget(size)
         root=QWidget(); self.setCentralWidget(root); layout=QVBoxLayout(root); top=QHBoxLayout(); layout.addLayout(top)
         for text,slot in [("新建项目",self.new_project),("导入已有项目",self.open_project),("保存 Ctrl+S",self.save),("上一张",lambda:self.navigate(-1)),("下一张",lambda:self.navigate(1)),("标为已审核",self.toggle_review),("导出",self.export_all)]:
@@ -586,6 +586,7 @@ class MainWindow(QMainWindow):
     def toggle_label_visibility(self,visible):
         self.view.set_labels_visible(visible)
         english=getattr(self,"ui_language","zh")=="en"
+        self.show_labels_action.setText(("Hide Labels" if visible else "Show Labels") if english else ("隐藏标签" if visible else "显示标签"))
         message=("Labels shown" if visible else "Labels hidden") if english else ("标签已显示" if visible else "标签已隐藏")
         self.statusBar().showMessage(message,3000)
 
