@@ -120,7 +120,7 @@ class AnnotationView(QGraphicsView):
         self.setScene(QGraphicsScene(self)); self.setBackgroundBrush(QColor("#090d14"))
         self.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
         self.setDragMode(QGraphicsView.ScrollHandDrag)
-        self.image_item = None; self.array = None; self.masks = []; self.selected = -1
+        self.image_item = None; self.array = None; self.masks = []; self.selected = -1; self.show_labels = True
         self.mode = "idle"; self.brush_size = 20; self.polygon = []; self.preview = None; self.drawing = False
         self.sam_box = None; self.box_start = None
         self.exemplar_mask = None
@@ -159,8 +159,10 @@ class AnnotationView(QGraphicsView):
                 self.overlay_item=self.scene().addPixmap(pixmap); self.overlay_item.setZValue(2)
             else:self.overlay_item.setPixmap(pixmap)
             self._background_key=background_key
-        self._redraw_active_overlay()
-        if self.exemplar_mask is not None:
+        if self.overlay_item is not None:self.overlay_item.setVisible(self.show_labels)
+        if self.show_labels:self._redraw_active_overlay()
+        elif self.active_overlay_item is not None:self.active_overlay_item.setVisible(False)
+        if self.show_labels and self.exemplar_mask is not None:
             contours,_=cv2.findContours(self.exemplar_mask.astype(np.uint8),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
             path=QPainterPath()
             for contour in contours:
@@ -248,6 +250,9 @@ class AnnotationView(QGraphicsView):
         self.mode = mode; self.setDragMode(QGraphicsView.ScrollHandDrag if mode == "pan" else QGraphicsView.NoDrag)
         self._update_tool_cursor()
         self.status.emit({"idle":"默认光标","pan":"平移/缩放","select":"点击选择实例","polygon":"左键加点，右键或 Enter 完成","brush":"直接绘制新实例；选中实例时修改它；Enter 完成当前实例","erase":"擦除选中实例","sam_box":"拖动绘制 SAM3 正框提示"}[mode])
+
+    def set_labels_visible(self,visible):
+        self.show_labels=bool(visible); self.redraw()
 
     def set_brush_size(self, size: int):
         self.brush_size=int(size); self._update_tool_cursor()
@@ -521,6 +526,7 @@ class MainWindow(QMainWindow):
         self.tool_actions={}; self.active_tool=None
         for text,mode,key in [("画笔","brush","B"),("多边形","polygon","P"),("橡皮擦","erase","E"),("选择","select","S"),("平移","pan","H"),("SAM3框","sam_box","G")]:
             act=QAction(text,self); act.setShortcut(key); act.setCheckable(True); act.triggered.connect(lambda _,m=mode:self.toggle_tool(m)); toolbar.addAction(act); self.tool_actions[mode]=act
+        toolbar.addSeparator(); self.show_labels_action=QAction("显示标签",self); self.show_labels_action.setShortcut("L"); self.show_labels_action.setCheckable(True); self.show_labels_action.setChecked(True); self.show_labels_action.triggered.connect(self.toggle_label_visibility); toolbar.addAction(self.show_labels_action)
         toolbar.addSeparator(); toolbar.addWidget(QLabel("笔刷 ")); size=QSpinBox(); size.setRange(1,300); size.setValue(20); size.valueChanged.connect(lambda value:self.view.set_brush_size(value)); toolbar.addWidget(size)
         root=QWidget(); self.setCentralWidget(root); layout=QVBoxLayout(root); top=QHBoxLayout(); layout.addLayout(top)
         for text,slot in [("新建项目",self.new_project),("导入已有项目",self.open_project),("保存 Ctrl+S",self.save),("上一张",lambda:self.navigate(-1)),("下一张",lambda:self.navigate(1)),("标为已审核",self.toggle_review),("导出",self.export_all)]:
@@ -576,6 +582,12 @@ class MainWindow(QMainWindow):
         self.active_tool=None
         for action in self.tool_actions.values():action.setChecked(False)
         self.view.polygon=[]; self.view.drawing=False; self.view.clear_mask_selection(); self.view.set_mode("idle")
+
+    def toggle_label_visibility(self,visible):
+        self.view.set_labels_visible(visible)
+        english=getattr(self,"ui_language","zh")=="en"
+        message=("Labels shown" if visible else "Labels hidden") if english else ("标签已显示" if visible else "标签已隐藏")
+        self.statusBar().showMessage(message,3000)
 
     def confirm_small_mask(self,index,area):
         if index<0 or index>=len(self.masks):return
