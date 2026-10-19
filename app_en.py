@@ -152,8 +152,7 @@ class MainWindow(ChineseMainWindow):
     def open_project(self):
         name,_=QFileDialog.getOpenFileName(self,"Import Existing Project: select annotations.json","","COCO JSON (*.json)")
         if not name:return
-        try:self.project.open_json(Path(name)); self.populate()
-        except Exception as exc:self.error(exc)
+        self._open_project_in_background(Path(name))
 
     def load_image(self,index):
         if index<0 or index>=len(self.project.image_paths):return
@@ -364,7 +363,9 @@ class MainWindow(ChineseMainWindow):
     def refresh_masks(self):
         current=self.view.selected; self.mask_list.blockSignals(True); self.mask_list.clear()
         for i,mask in enumerate(self.masks):
-            _,area=mask_geometry(mask["mask"]); category_id=int(mask.get("category_id",1)); category=self.project.category(category_id); name=(category or {}).get("name","Unknown"); phrase=mask.get("noun_phrase",name)
+            area=float(mask.get("area",-1)) if not mask.get("_geometry_dirty",False) else -1
+            if area<0:area=float(np.count_nonzero(mask["mask"]));mask["area"]=area
+            category_id=int(mask.get("category_id",1)); category=self.project.category(category_id); name=(category or {}).get("name","Unknown")
             self.mask_list.addItem(f"Instance {i+1} | Label: {name} | Area {area:.0f}")
         self.mask_list.blockSignals(False)
         if 0<=current<len(self.masks):self.mask_list.setCurrentRow(current)
@@ -434,6 +435,7 @@ class MainWindow(ChineseMainWindow):
 
     def closeEvent(self,event):
         if self.export_thread and self.export_thread.isRunning():QMessageBox.warning(self,"Export","Please cancel the export and wait for it to stop before closing.");event.ignore();return
+        if self.open_thread and self.open_thread.isRunning():QMessageBox.warning(self,"Import Existing Project","Please wait for the project import to finish before closing.");event.ignore();return
         if self.project.dirty:
             answer=QMessageBox.question(self,"Save Changes","Save changes before closing?",QMessageBox.Yes|QMessageBox.No|QMessageBox.Cancel)
             if answer==QMessageBox.Cancel:event.ignore();return

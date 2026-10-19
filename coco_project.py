@@ -81,6 +81,13 @@ class CocoProject:
         self.reviewed: set[int] = set()
         self.dirty = False
         self._backup_done = False
+        self._annotations_by_image: dict[int, list[dict]] = {}
+
+    def _rebuild_annotation_index(self) -> None:
+        index: dict[int, list[dict]] = {}
+        for annotation in self.data.get("annotations", []):
+            index.setdefault(int(annotation.get("image_id", -1)), []).append(annotation)
+        self._annotations_by_image = index
 
     def new_from_folder(self, folder: Path) -> None:
         folder = folder.resolve()
@@ -108,6 +115,7 @@ class CocoProject:
                 width, height = im.size
             images.append({"id": idx, "file_name": path.name, "width": width, "height": height})
         self.data = {"info": {"description": "Particle Label GUI project", "created": datetime.now().isoformat(timespec="seconds")}, "images": images, "annotations": [], "categories": [{"id": 1, "name": "particle", "supercategory": "particle"}]}
+        self._rebuild_annotation_index()
         self.reviewed, self.dirty, self._backup_done = set(), True, False
 
     def add_images(self, paths: list[Path], copy_into_project: bool = True) -> list[int]:
@@ -160,6 +168,7 @@ class CocoProject:
         self.data["images"] = [item for index, item in enumerate(self.data["images"]) if index not in valid]
         self.image_paths = [path for index, path in enumerate(self.image_paths) if index not in valid]
         self.data["annotations"] = [item for item in self.data.get("annotations", []) if int(item.get("image_id", -1)) not in removed_ids]
+        self._rebuild_annotation_index()
         self.reviewed.difference_update(removed_ids)
         self.dirty = True
         return len(valid), annotation_count
@@ -195,6 +204,7 @@ class CocoProject:
                 self.reviewed = set()
         else:
             self.reviewed = set()
+        self._rebuild_annotation_index()
         self.dirty, self._backup_done = False, False
 
     def image_record(self, index: int) -> dict:
@@ -202,11 +212,10 @@ class CocoProject:
 
     def masks_for(self, image_id: int, width: int, height: int) -> list[dict]:
         result = []
-        for ann in self.data["annotations"]:
-            if ann.get("image_id") == image_id:
-                item = copy.deepcopy(ann)
-                item["mask"] = polygons_to_mask(item.get("segmentation", []), width, height)
-                result.append(item)
+        for ann in self._annotations_by_image.get(int(image_id), []):
+            item = copy.deepcopy(ann)
+            item["mask"] = polygons_to_mask(item.get("segmentation", []), width, height)
+            result.append(item)
         return result
 
     def categories(self) -> list[dict]:
@@ -298,6 +307,7 @@ class CocoProject:
                 saved_item["mask_prompt_source"] = str(item["mask_prompt_source"])
             saved.append(saved_item)
         self.data["annotations"] = others + saved
+        self._rebuild_annotation_index()
         self.dirty = True
 
     def save(self) -> None:

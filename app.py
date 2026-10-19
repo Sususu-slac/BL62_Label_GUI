@@ -135,6 +135,12 @@ class AnnotationView(QGraphicsView):
         self.scene().clear(); self.array = array; self.masks = masks; self.selected = -1; self.polygon = []; self.overlay_item=None; self.active_overlay_item=None
         self._overlay_cache=None; self._overlay_signature=None; self._editing_background=None; self._background_key=None
         self._hit_map=None; self._hit_signature=None; self._bbox_cache={}
+        h,w=array.shape[:2]
+        for entry in masks:
+            bbox=entry.get("bbox")
+            if bbox and len(bbox)>=4 and not entry.get("_geometry_dirty",False):
+                x,y,bw,bh=[int(round(float(value))) for value in bbox[:4]]
+                self._bbox_cache[id(entry["mask"])]=(max(0,x),max(0,y),min(w,x+bw),min(h,y+bh)) if bw>0 and bh>0 else None
         rgb = np.ascontiguousarray(array[..., :3]); h,w = rgb.shape[:2]
         qimg = QImage(rgb.data, w, h, rgb.strides[0], QImage.Format_RGB888).copy()
         self.image_item = self.scene().addPixmap(QPixmap.fromImage(qimg)); self.image_item.setZValue(0)
@@ -184,7 +190,10 @@ class AnnotationView(QGraphicsView):
         h,w=self.array.shape[:2]; overlay=np.zeros((h,w,4),dtype=np.uint8)
         for idx,entry in enumerate(self.masks):
             if idx==exclude:continue
-            mask=entry["mask"]; overlay[mask,:3]=COLORS[idx%len(COLORS)]; overlay[mask,3]=100
+            mask=entry["mask"]; box=self._mask_bbox(mask)
+            if box is None:continue
+            x0,y0,x1,y1=box; crop=mask[y0:y1,x0:x1]; region=overlay[y0:y1,x0:x1]
+            region[crop,:3]=COLORS[idx%len(COLORS)]; region[crop,3]=100
         return overlay
 
     def _editing_overlay(self,selected):
@@ -461,6 +470,20 @@ class Sam3Engine(QObject):
         except Exception as exc:self.failed.emit(f"SAM3 推理失败：{type(exc).__name__}: {exc}")
 
 
+class ProjectOpenWorker(QObject):
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, json_path):
+        super().__init__(); self.json_path=Path(json_path)
+
+    @Slot()
+    def run(self):
+        try:
+            project=CocoProject(); project.open_json(self.json_path); self.completed.emit(project)
+        except Exception as exc:self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
 class ExportWorker(QObject):
     progress = Signal(int, int, str)
     completed = Signal(str)
@@ -524,6 +547,7 @@ class MainWindow(QMainWindow):
         self.project=CocoProject(); self.index=-1; self.masks=[]; self.current_masks_dirty=False; self.undo_stack=[]; self.redo_stack=[]; self.sam_busy=False; self.sam_loaded_flag=False
         self._sam_replace_requested=False; self._sam_replace_box=None
         self.export_thread=None; self.export_worker=None; self.export_dialog=None
+        self.open_thread=None; self.open_worker=None; self.open_dialog=None
         self.prompt_mode="text"; self.mask_prompt=None; self.mask_prompt_source=None; self.capture_mask_prompt=False
         self.settings_path=Path(__file__).with_name("sam3_settings.json")
         self._build(); self.statusBar().showMessage("新建文件夹/图片项目，或打开 COCO annotations.json；可拖拽图片加入当前项目")
@@ -869,8 +893,27 @@ class MainWindow(QMainWindow):
     def open_project(self):
         name,_=QFileDialog.getOpenFileName(self,"导入已有项目：选择 annotations.json","","COCO JSON (*.json)")
         if not name:return
-        try:self.project.open_json(Path(name)); self.populate()
-        except Exception as e:self.error(e)
+        self._open_project_in_background(Path(name))
+    def _open_project_in_background(self,path):
+        if self.open_thread and self.open_thread.isRunning():return
+        english=getattr(self,"ui_language","zh")=="en"
+        self.open_dialog=QProgressDialog("Reading and indexing the COCO project…" if english else "正在读取并索引 COCO 项目……","",0,0,self)
+        self.open_dialog.setWindowTitle("Import Existing Project" if english else "导入已有项目"); self.open_dialog.setCancelButton(None); self.open_dialog.setWindowModality(Qt.WindowModal); self.open_dialog.setMinimumDuration(0); self.open_dialog.show()
+        self.open_thread=QThread(self); self.open_worker=ProjectOpenWorker(path); self.open_worker.moveToThread(self.open_thread)
+        self.open_thread.started.connect(self.open_worker.run); self.open_worker.completed.connect(self._project_opened); self.open_worker.failed.connect(self._project_open_failed)
+        self.open_worker.completed.connect(self.open_worker.deleteLater); self.open_worker.failed.connect(self.open_worker.deleteLater)
+        self.open_worker.completed.connect(self.open_thread.quit); self.open_worker.failed.connect(self.open_thread.quit); self.open_thread.finished.connect(self._project_open_cleanup); self.open_thread.start()
+    def _project_opened(self,project):
+        if self.open_dialog:self.open_dialog.close()
+        self.project=project; self.index=-1; self.masks=[]; self.undo_stack=[]; self.redo_stack=[]; self.populate()
+        count=len(project.image_paths); annotations=len(project.data.get("annotations",[])); english=getattr(self,"ui_language","zh")=="en"
+        self.statusBar().showMessage((f"Project imported: {count} images, {annotations} annotations" if english else f"项目导入完成：{count} 张图片，{annotations} 个标注"),7000)
+    def _project_open_failed(self,message):
+        if self.open_dialog:self.open_dialog.close()
+        self.error(message)
+    def _project_open_cleanup(self):
+        if self.open_thread:self.open_thread.deleteLater()
+        self.open_worker=None; self.open_thread=None; self.open_dialog=None
     def remove_from_project(self):
         english=getattr(self,"ui_language","zh")=="en"
         rows=sorted({item.row() for item in self.images.selectedIndexes()})
@@ -928,7 +971,9 @@ class MainWindow(QMainWindow):
     def refresh_masks(self):
         current=self.view.selected; self.mask_list.blockSignals(True); self.mask_list.clear()
         for i,m in enumerate(self.masks):
-            _,area=mask_geometry(m["mask"]); category_id=int(m.get("category_id",1)); category=self.project.category(category_id); name=(category or {}).get("name","未知"); phrase=m.get("noun_phrase",name)
+            area=float(m.get("area",-1)) if not m.get("_geometry_dirty",False) else -1
+            if area<0:area=float(np.count_nonzero(m["mask"]));m["area"]=area
+            category_id=int(m.get("category_id",1)); category=self.project.category(category_id); name=(category or {}).get("name","未知"); phrase=m.get("noun_phrase",name)
             self.mask_list.addItem(f"实例 {i+1} | 标签：{name} | 面积 {area:.0f}")
         self.mask_list.blockSignals(False)
         if 0<=current<len(self.masks):self.mask_list.setCurrentRow(current)
@@ -1040,6 +1085,7 @@ class MainWindow(QMainWindow):
     def error(self,e):QMessageBox.critical(self,"错误",str(e))
     def closeEvent(self,event):
         if self.export_thread and self.export_thread.isRunning():QMessageBox.warning(self,"Export","Please cancel the export and wait for it to stop before closing." if getattr(self,"ui_language","zh")=="en" else "请先取消导出并等待任务停止后再关闭窗口。");event.ignore();return
+        if self.open_thread and self.open_thread.isRunning():QMessageBox.warning(self,"Import Existing Project" if getattr(self,"ui_language","zh")=="en" else "导入已有项目","Please wait for the project import to finish before closing." if getattr(self,"ui_language","zh")=="en" else "请等待项目导入完成后再关闭。");event.ignore();return
         if self.project.dirty:
             ans=QMessageBox.question(self,"保存更改","关闭前保存更改吗？",QMessageBox.Yes|QMessageBox.No|QMessageBox.Cancel)
             if ans==QMessageBox.Cancel:event.ignore();return
