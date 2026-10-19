@@ -4,6 +4,7 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image
 from PySide6.QtGui import QAction
+from PySide6.QtCore import QPoint,QPointF
 from PySide6.QtWidgets import QApplication,QLabel,QPushButton
 from app import AnnotationView,ExportWorker,MainWindow
 from app_en import MainWindow as EnglishMainWindow
@@ -32,6 +33,17 @@ class BrushPerformanceTest(unittest.TestCase):
   view=AnnotationView();image=np.zeros((1024,1024,3),np.uint8);view.set_image(image,self.masks(100));view.selected=0;view.redraw();started=time.perf_counter()
   for _ in range(50):view.set_labels_visible(False);view.set_labels_visible(True)
   elapsed=time.perf_counter()-started;self.assertLess(elapsed,1.0,f'100 label visibility changes took {elapsed:.3f}s')
+ def test_wheel_zoom_keeps_cursor_on_same_image_point(self):
+  view=AnnotationView();view.resize(800,600);view.set_image(np.zeros((1000,1000,3),np.uint8),[]);view.scale(3,3);cursor=QPointF(213,177);before=view.mapToScene(cursor.toPoint())
+  event=type('WheelEvent',(),{'position':lambda self:cursor,'angleDelta':lambda self:QPoint(0,120),'accept':lambda self:None})()
+  view.wheelEvent(event);after=view.mapToScene(cursor.toPoint());self.assertAlmostEqual(before.x(),after.x(),places=5);self.assertAlmostEqual(before.y(),after.y(),places=5)
+ def test_sam_box_replacement_keeps_labels_outside_box(self):
+  window=MainWindow();inside=np.zeros((100,100),bool);inside[20:30,20:30]=True;outside=np.zeros((100,100),bool);outside[70:80,70:80]=True
+  window.masks=[{'mask':inside},{'mask':outside}];window.view.masks=window.masks;window._sam_replace_requested=True;window._sam_replace_box=(10,10,40,40);window._apply_pending_sam_replacement()
+  self.assertEqual(len(window.masks),1);self.assertTrue(np.array_equal(window.masks[0]['mask'],outside));window.project.dirty=False;window.sam_thread.quit();window.sam_thread.wait(3000);window.close()
+ def test_full_sam_replacement_clears_all_labels_only_on_success(self):
+  window=MainWindow();window.masks=self.masks(4,100,100);window.view.masks=window.masks;window._sam_replace_requested=True;window._sam_replace_box=None
+  self.assertEqual(len(window.masks),4);window._apply_pending_sam_replacement();self.assertEqual(window.masks,[]);window.project.dirty=False;window.sam_thread.quit();window.sam_thread.wait(3000);window.close()
  def test_packed_undo_redo(self):
   window=MainWindow();window.masks=self.masks(20,256,256);window.view.masks=window.masks;original=window.masks[0]['mask'].copy();window.push_undo();window.masks[0]['mask'][100:110,100:110]=True;window.undo();self.assertTrue(np.array_equal(window.masks[0]['mask'],original));window.redo();self.assertTrue(window.masks[0]['mask'][105,105]);window.close()
  def test_export_contains_current_coco_json(self):

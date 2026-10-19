@@ -281,7 +281,13 @@ class AnnotationView(QGraphicsView):
         self.viewport().setCursor(cursor)
 
     def wheelEvent(self, event):
-        factor = 1.2 if event.angleDelta().y() > 0 else 1/1.2; self.scale(factor,factor); self._update_tool_cursor()
+        if not event.angleDelta().y():return super().wheelEvent(event)
+        cursor=event.position().toPoint(); anchor_before=self.mapToScene(cursor)
+        current=abs(self.transform().m11()); requested=1.2 if event.angleDelta().y()>0 else 1/1.2
+        target=max(0.05,min(40.0,current*requested)); factor=target/current if current else 1.0
+        previous_anchor=self.transformationAnchor(); self.setTransformationAnchor(QGraphicsView.NoAnchor); self.scale(factor,factor)
+        anchor_after=self.mapToScene(cursor); delta=anchor_after-anchor_before; self.translate(delta.x(),delta.y())
+        self.setTransformationAnchor(previous_anchor); self._update_tool_cursor(); event.accept()
 
     def image_pos(self, event):
         if self.image_item is None: return None
@@ -516,6 +522,7 @@ class MainWindow(QMainWindow):
         if icon_path.is_file():self.setWindowIcon(QIcon(str(icon_path)))
         self.setAcceptDrops(True)
         self.project=CocoProject(); self.index=-1; self.masks=[]; self.current_masks_dirty=False; self.undo_stack=[]; self.redo_stack=[]; self.sam_busy=False; self.sam_loaded_flag=False
+        self._sam_replace_requested=False; self._sam_replace_box=None
         self.export_thread=None; self.export_worker=None; self.export_dialog=None
         self.prompt_mode="text"; self.mask_prompt=None; self.mask_prompt_source=None; self.capture_mask_prompt=False
         self.settings_path=Path(__file__).with_name("sam3_settings.json")
@@ -626,17 +633,43 @@ class MainWindow(QMainWindow):
     def sam_loaded(self,message):
         self.sam_busy=False; self.sam_loaded_flag=True; self.load_sam_btn.setEnabled(True); self.update_run_button(); self.sam_status.setText(message)
     def sam_failed(self,message):
+        self._sam_replace_requested=False; self._sam_replace_box=None
         self.sam_busy=False; self.load_sam_btn.setEnabled(True); self.sam_loaded_flag=self.sam_engine.processor is not None; self.update_run_button(); self.sam_status.setText(message); QMessageBox.critical(self,"SAM3",message)
+    def _confirm_sam_replacement(self):
+        self._sam_replace_requested=False; self._sam_replace_box=None
+        if not self.masks:return True
+        english=getattr(self,"ui_language","zh")=="en"; box=self.view.sam_box
+        dialog=QMessageBox(self); dialog.setIcon(QMessageBox.Warning); dialog.setWindowTitle("Replace Existing Labels" if english else "替换现有标签")
+        if box:
+            message=("This image already contains labels. Clear labels intersecting the current SAM3 Box and run SAM3 again? Labels outside the box will be kept."
+                     if english else "当前图片已有标签。是否清除与当前 SAM3 Box 相交的标签并重新运行？Box 外的标签会保留。")
+        else:
+            message=("This image already contains labels. Clear all existing labels and run SAM3 again?"
+                     if english else "当前图片已有标签。是否清除全部现有标签并重新运行 SAM3？")
+        dialog.setText(message); run_button=dialog.addButton("Clear Labels and Run" if english else "清除标签并运行",QMessageBox.AcceptRole); dialog.addButton(QMessageBox.Cancel); dialog.setDefaultButton(QMessageBox.Cancel); dialog.exec()
+        if dialog.clickedButton() is not run_button:return False
+        self._sam_replace_requested=True; self._sam_replace_box=tuple(box) if box else None
+        return True
+    def _apply_pending_sam_replacement(self):
+        if not self._sam_replace_requested:return
+        box=self._sam_replace_box
+        if box:
+            x0,y0,x1,y1=[int(v) for v in box]
+            self.masks[:]=[item for item in self.masks if not np.asarray(item["mask"],dtype=bool)[max(0,y0):y1+1,max(0,x0):x1+1].any()]
+        else:self.masks.clear()
+        self._sam_replace_requested=False; self._sam_replace_box=None
     def run_sam3(self):
         if self.view.array is None:return
         prompt=self.prompt.currentText().strip()
         if self.prompt_mode=="text" and not prompt:QMessageBox.warning(self,"SAM3","Text Prompt 不能为空");return
         if self.prompt_mode=="mask" and self.mask_prompt is None:QMessageBox.warning(self,"SAM3","请先选择或绘制一个 Mask Prompt");return
         if not prompt:prompt=(self.project.category(self.current_category_id()) or {"name":"particle"})["name"]
+        if not self._confirm_sam_replacement():return
         self.sam_busy=True; self.run_sam_btn.setEnabled(False); self.sam_status.setText("SAM3 正在后台推理……")
         self.predict_sam3_requested.emit(self.view.array.copy(),prompt,self.confidence.value()/100,self.view.sam_box,self.prompt_mode,None if self.mask_prompt is None else self.mask_prompt.copy())
     def sam_predicted(self,masks,scores):
         self.push_undo(); prompt=self.prompt.currentText().strip(); category_id=self.current_category_id()
+        self._apply_pending_sam_replacement()
         source="sam3_text" if self.prompt_mode=="text" else "sam3_mask_prompt"
         for mask,score in zip(masks,scores):
             item={"id":0,"category_id":category_id,"noun_phrase":prompt,"score":float(score),"annotation_source":source,"mask":mask}

@@ -237,6 +237,7 @@ class MainWindow(ChineseMainWindow):
             .replace("请先加载 SAM3 模型","Load the SAM3 model first")
             .replace("请先指定或绘制一个 Mask Prompt","Select or draw a Mask Prompt first")
             .replace("Mask Prompt 不在当前 SAM3 框范围内","The Mask Prompt is outside the current SAM3 box"))
+        self._sam_replace_requested=False; self._sam_replace_box=None
         self.sam_busy=False; self.load_sam_btn.setEnabled(True); self.run_sam_btn.setEnabled(self.sam_engine.processor is not None); self.sam_status.setText(english); QMessageBox.critical(self,"SAM3",english)
 
     def run_sam3(self):
@@ -245,6 +246,7 @@ class MainWindow(ChineseMainWindow):
         if self.prompt_mode=="text" and not prompt:QMessageBox.warning(self,"SAM3","The Text Prompt cannot be empty");return
         if self.prompt_mode=="mask" and self.mask_prompt is None:QMessageBox.warning(self,"SAM3","Select or draw a Mask Prompt first");return
         if not prompt:prompt=(self.project.category(self.current_category_id()) or {"name":"particle"})["name"]
+        if not self._confirm_sam_replacement():return
         self._start_isolated_inference(prompt)
 
     def _start_isolated_inference(self, prompt):
@@ -291,6 +293,7 @@ class MainWindow(ChineseMainWindow):
         self._read_inference_output()
         try:
             if self.task_cancelled:
+                self._sam_replace_requested=False; self._sam_replace_box=None
                 self.sam_busy=False; self.update_run_button(); self.sam_status.setText("SAM3 inference cancelled"); self.task_cancelled=False; return
             if code!=0 or not output_path.exists():
                 error=bytes(self.inference_process.readAllStandardError()).decode("utf-8",errors="replace").strip()
@@ -298,6 +301,7 @@ class MainWindow(ChineseMainWindow):
             result=np.load(output_path,allow_pickle=False)
             self.sam_predicted(result["masks"],result["scores"].tolist())
         except Exception as exc:
+            self._sam_replace_requested=False; self._sam_replace_box=None
             self.sam_busy=False; self.update_run_button(); self.sam_status.setText(f"SAM3 inference failed: {exc}")
             QMessageBox.critical(self,"SAM3",self.sam_status.text())
         finally:
@@ -310,11 +314,12 @@ class MainWindow(ChineseMainWindow):
             self.load_process.kill(); self.load_process.waitForFinished(3000)
         if self.inference_process and self.inference_process.state()!=QProcess.NotRunning:
             self.inference_process.kill(); self.inference_process.waitForFinished(3000)
-        self.inference_timer.stop(); self.sam_busy=False; self.update_run_button(); self.cancel_sam_btn.setEnabled(False)
+        self.inference_timer.stop(); self._sam_replace_requested=False; self._sam_replace_box=None; self.sam_busy=False; self.update_run_button(); self.cancel_sam_btn.setEnabled(False)
         self.sam_status.setText("SAM3 task cancelled")
 
     def sam_predicted(self,masks,scores):
         self.push_undo(); prompt=self.prompt.currentText().strip()
+        self._apply_pending_sam_replacement()
         category_id=self.current_category_id(); source="sam3_text" if self.prompt_mode=="text" else "sam3_mask_prompt"
         for mask,score in zip(masks,scores):
             item={"id":0,"category_id":category_id,"noun_phrase":prompt,"score":float(score),"annotation_source":source,"mask":mask}
