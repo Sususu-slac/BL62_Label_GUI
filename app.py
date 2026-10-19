@@ -122,6 +122,7 @@ class AnnotationView(QGraphicsView):
         self.setDragMode(QGraphicsView.ScrollHandDrag)
         self.image_item = None; self.array = None; self.masks = []; self.selected = -1; self.show_labels = True
         self.mode = "idle"; self.brush_size = 20; self.polygon = []; self.preview = None; self.drawing = False
+        self._middle_panning=False; self._middle_pan_pos=None
         self.sam_box = None; self.box_start = None
         self.exemplar_mask = None
         self._overlay_cache=None; self._overlay_signature=None; self._editing_background=None; self.overlay_item=None; self.active_overlay_item=None
@@ -306,6 +307,8 @@ class AnnotationView(QGraphicsView):
         return (x,y) if 0 <= x < w and 0 <= y < h else None
 
     def mousePressEvent(self, event):
+        if event.button()==Qt.MiddleButton:
+            self._middle_panning=True; self._middle_pan_pos=event.position(); self.viewport().setCursor(QCursor(Qt.ClosedHandCursor)); event.accept(); return
         pos = self.image_pos(event)
         if pos is None: return super().mousePressEvent(event)
         x,y = pos
@@ -346,6 +349,11 @@ class AnnotationView(QGraphicsView):
             self.box_start=(x,y); self.sam_box=(x,y,x,y); self.drawing=True; self.redraw()
 
     def mouseMoveEvent(self,event):
+        if self._middle_panning and self._middle_pan_pos is not None:
+            delta=event.position()-self._middle_pan_pos; self._middle_pan_pos=event.position()
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value()-int(round(delta.x())))
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value()-int(round(delta.y())))
+            event.accept(); return
         if self.drawing and self.mode in {"brush","erase"}:
             pos=self.image_pos(event)
             if pos: self.paint_at(*pos)
@@ -356,6 +364,8 @@ class AnnotationView(QGraphicsView):
         else: super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self,event):
+        if event.button()==Qt.MiddleButton and self._middle_panning:
+            self._middle_panning=False; self._middle_pan_pos=None; self._update_tool_cursor(); event.accept(); return
         was_box=self.drawing and self.mode=="sam_box"
         if self.mode in {"brush","erase"}:
             if self.drawing and 0<=self.selected<len(self.masks):self._commit_editing_overlay(self.selected)
@@ -1038,7 +1048,9 @@ class MainWindow(QMainWindow):
         self.images.item(row).setText(prefix+path.name)
     def save(self):
         if self.project.json_path is None:return
-        try:self.commit_current(force=True); self.project.save(); self.update_image_status(self.index); self.statusBar().showMessage(f"已保存：{self.project.json_path}",5000)
+        try:
+            self.commit_current(force=True); self.project.save(); self.update_image_status(self.index); self.statusBar().showMessage(f"已保存：{self.project.json_path}",5000)
+            QMessageBox.information(self,"保存完成","已保存。")
         except Exception as e:self.error(e)
     def export_all(self):
         if self.project.root is None:return

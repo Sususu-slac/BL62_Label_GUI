@@ -4,7 +4,7 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image
 from PySide6.QtGui import QAction
-from PySide6.QtCore import QPoint,QPointF
+from PySide6.QtCore import QPoint,QPointF,Qt
 from PySide6.QtWidgets import QApplication,QLabel,QPushButton
 from app import AnnotationView,ExportWorker,MainWindow
 from app_en import MainWindow as EnglishMainWindow
@@ -37,6 +37,15 @@ class BrushPerformanceTest(unittest.TestCase):
   view=AnnotationView();view.resize(800,600);view.set_image(np.zeros((1000,1000,3),np.uint8),[]);view.scale(3,3);cursor=QPointF(213,177);before=view.mapToScene(cursor.toPoint())
   event=type('WheelEvent',(),{'position':lambda self:cursor,'angleDelta':lambda self:QPoint(0,120),'accept':lambda self:None})()
   view.wheelEvent(event);after=view.mapToScene(cursor.toPoint());self.assertAlmostEqual(before.x(),after.x(),places=5);self.assertAlmostEqual(before.y(),after.y(),places=5)
+ def test_middle_mouse_temporarily_pans_without_changing_tool(self):
+  view=AnnotationView();view.set_image(np.zeros((512,512,3),np.uint8),[]);view.set_mode('brush')
+  press=type('MouseEvent',(),{'button':lambda self:Qt.MiddleButton,'position':lambda self:QPointF(100,100),'accept':lambda self:None})()
+  move=type('MouseEvent',(),{'position':lambda self:QPointF(125,130),'accept':lambda self:None})();release=type('MouseEvent',(),{'button':lambda self:Qt.MiddleButton,'accept':lambda self:None})()
+  view.mousePressEvent(press);self.assertTrue(view._middle_panning);self.assertEqual(view.mode,'brush');view.mouseMoveEvent(move);view.mouseReleaseEvent(release);self.assertFalse(view._middle_panning);self.assertEqual(view.mode,'brush')
+ def test_english_save_shows_saved_confirmation(self):
+  window=EnglishMainWindow();window.project.json_path=Path('annotations.json');window.project.dirty=False
+  with patch.object(window,'commit_current'),patch.object(window.project,'save'),patch('app_en.QMessageBox.information') as notice:window.save();notice.assert_called_once_with(window,'Save Complete','Saved.')
+  window.project.dirty=False;window.sam_thread.quit();window.sam_thread.wait(3000);window.close()
  def test_sam_box_replacement_keeps_labels_outside_box(self):
   window=MainWindow();inside=np.zeros((100,100),bool);inside[20:30,20:30]=True;outside=np.zeros((100,100),bool);outside[70:80,70:80]=True
   window.masks=[{'mask':inside},{'mask':outside}];window.view.masks=window.masks;window._sam_replace_requested=True;window._sam_replace_box=(10,10,40,40);window._apply_pending_sam_replacement()
