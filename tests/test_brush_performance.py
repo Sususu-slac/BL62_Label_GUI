@@ -44,7 +44,7 @@ class BrushPerformanceTest(unittest.TestCase):
   view.mousePressEvent(press);self.assertTrue(view._middle_panning);self.assertEqual(view.mode,'brush');view.mouseMoveEvent(move);view.mouseReleaseEvent(release);self.assertFalse(view._middle_panning);self.assertEqual(view.mode,'brush')
  def test_english_save_shows_saved_confirmation(self):
   window=EnglishMainWindow();window.project.json_path=Path('annotations.json');window.project.dirty=False
-  with patch.object(window,'commit_current'),patch.object(window.project,'save'),patch('app_en.QMessageBox.information') as notice:window.save();notice.assert_called_once_with(window,'Save Complete','Saved.')
+  with patch.object(window,'commit_current'),patch.object(window.project,'save'),patch('app_en.QMessageBox.information') as notice:window.save();notice.assert_called_once_with(window,'Save Complete','Saved to:\nannotations.json')
   window.project.dirty=False;window.sam_thread.quit();window.sam_thread.wait(3000);window.close()
  def test_sam_box_replacement_keeps_labels_outside_box(self):
   window=MainWindow();inside=np.zeros((100,100),bool);inside[20:30,20:30]=True;outside=np.zeros((100,100),bool);outside[70:80,70:80]=True

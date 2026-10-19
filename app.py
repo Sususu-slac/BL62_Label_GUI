@@ -1067,7 +1067,7 @@ class MainWindow(QMainWindow):
         if self.project.json_path is None:return
         try:
             self.commit_current(force=True); self.project.save(); self.update_image_status(self.index); self.statusBar().showMessage(f"已保存：{self.project.json_path}",5000)
-            QMessageBox.information(self,"保存完成","已保存。")
+            QMessageBox.information(self,"保存完成",f"已保存到：\n{self.project.json_path}")
         except Exception as e:self.error(e)
     def export_all(self):
         if self.project.root is None:return

@@ -184,7 +184,7 @@ class MainWindow(ChineseMainWindow):
         if self.project.json_path is None:return
         try:
             self.commit_current(force=True); self.project.save(); self.update_image_status(self.index); self.statusBar().showMessage(f"Saved: {self.project.json_path}",5000)
-            QMessageBox.information(self,"Save Complete","Saved.")
+            QMessageBox.information(self,"Save Complete",f"Saved to:\n{self.project.json_path}")
         except Exception as exc:self.error(exc)
 
     def load_sam3(self):
