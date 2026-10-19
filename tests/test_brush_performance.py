@@ -54,7 +54,12 @@ class BrushPerformanceTest(unittest.TestCase):
   window=MainWindow();window.masks=self.masks(4,100,100);window.view.masks=window.masks;window._sam_replace_requested=True;window._sam_replace_box=None
   self.assertEqual(len(window.masks),4);window._apply_pending_sam_replacement();self.assertEqual(window.masks,[]);window.project.dirty=False;window.sam_thread.quit();window.sam_thread.wait(3000);window.close()
  def test_packed_undo_redo(self):
-  window=MainWindow();window.masks=self.masks(20,256,256);window.view.masks=window.masks;original=window.masks[0]['mask'].copy();window.push_undo();window.masks[0]['mask'][100:110,100:110]=True;window.undo();self.assertTrue(np.array_equal(window.masks[0]['mask'],original));window.redo();self.assertTrue(window.masks[0]['mask'][105,105]);window.close()
+  window=MainWindow();window.masks=self.masks(20,256,256);window.view.masks=window.masks;window.view.array=np.zeros((256,256,3),np.uint8);window.view.selected=0;original=window.masks[0]['mask'].copy();window.push_undo();window.masks[0]['mask'][100:110,100:110]=True;window.undo();self.assertTrue(np.array_equal(window.masks[0]['mask'],original));window.redo();self.assertTrue(window.masks[0]['mask'][105,105]);window.close()
+ def test_copy_on_write_undo_is_responsive(self):
+  window=MainWindow();window.masks=self.masks(100,1024,1024);window.view.set_image(np.zeros((1024,1024,3),np.uint8),window.masks);window.view.selected=0;started=time.perf_counter();window.push_undo();window.masks[0]['mask'][400:420,400:420]=True;window.undo();elapsed=time.perf_counter()-started
+  self.assertLess(elapsed,1.0,f'copy-on-write undo took {elapsed:.3f}s');window.project.dirty=False;window.sam_thread.quit();window.sam_thread.wait(3000);window.close()
+ def test_right_click_finish_clears_current_brush_instance(self):
+  view=AnnotationView();masks=self.masks(1,128,128);view.set_image(np.zeros((128,128,3),np.uint8),masks);view.set_mode('brush');view.selected=0;view.finish_current_instance();self.assertEqual(view.selected,-1);self.assertEqual(len(masks),1)
  def test_export_contains_current_coco_json(self):
   with tempfile.TemporaryDirectory() as temp:
    root=Path(temp);images=root/'images';images.mkdir();Image.fromarray(np.zeros((32,32,3),np.uint8)).save(images/'slice.png');out=root/'export'

@@ -309,6 +309,8 @@ class AnnotationView(QGraphicsView):
     def mousePressEvent(self, event):
         if event.button()==Qt.MiddleButton:
             self._middle_panning=True; self._middle_pan_pos=event.position(); self.viewport().setCursor(QCursor(Qt.ClosedHandCursor)); event.accept(); return
+        if event.button()==Qt.RightButton and self.mode in {"brush","erase"}:
+            self.finish_current_instance(); event.accept(); return
         pos = self.image_pos(event)
         if pos is None: return super().mousePressEvent(event)
         x,y = pos
@@ -397,6 +399,20 @@ class AnnotationView(QGraphicsView):
     def clear_mask_selection(self):
         self.selected=-1; self.selection_requested.emit(-1); self.redraw()
 
+    def detach_selected_mask(self):
+        if not (0<=self.selected<len(self.masks)) or self.array is None:return
+        old_mask=self.masks[self.selected]["mask"]; new_mask=old_mask.copy(); self.masks[self.selected]["mask"]=new_mask
+        if id(old_mask) in self._bbox_cache:self._bbox_cache[id(new_mask)]=self._bbox_cache[id(old_mask)]
+        h,w=self.array.shape[:2]; self._overlay_signature=(h,w,*(id(entry["mask"]) for entry in self.masks)); self._hit_signature=None
+
+    def finish_current_instance(self):
+        if self.mode not in {"brush","erase"} or not (0<=self.selected<len(self.masks)):return
+        finished=self.selected; finished_item=self.masks[finished]; area=int(finished_item["mask"].sum())
+        self.masks_changed.emit(); self.clear_mask_selection(); self.status.emit("当前实例已完成；继续绘制会创建新实例")
+        if area<10:self.small_mask_finished.emit(finished,area)
+        remaining=next((i for i,item in enumerate(self.masks) if item is finished_item),-1)
+        if self.mode=="brush" and remaining>=0:self.instance_finished.emit(remaining)
+
     def keyPressEvent(self,event):
         if event.key()==Qt.Key_Escape:
             self.polygon=[]; self.drawing=False; self._live_redraw_timer.stop(); self._live_redraw_pending=False; self._editing_background=None; self._overlay_signature=None; self._background_key=None; self._hit_signature=None; self.redraw(); self.tool_reset_requested.emit(); return
@@ -404,14 +420,7 @@ class AnnotationView(QGraphicsView):
             self.finish_polygon(); finished=self.selected
             if 0<=finished<len(self.masks) and int(self.masks[finished]["mask"].sum())<10:self.small_mask_finished.emit(finished,int(self.masks[finished]["mask"].sum()))
             self.clear_mask_selection()
-        elif event.key() in (Qt.Key_Return,Qt.Key_Enter) and self.mode=="brush":
-            finished=self.selected; finished_item=self.masks[finished] if 0<=finished<len(self.masks) else None; self.masks_changed.emit(); self.clear_mask_selection(); self.status.emit("当前实例已完成；继续绘制会创建新实例")
-            if finished_item is not None and int(finished_item["mask"].sum())<10:self.small_mask_finished.emit(finished,int(finished_item["mask"].sum()))
-            remaining=next((i for i,item in enumerate(self.masks) if item is finished_item),-1)
-            if remaining>=0:self.instance_finished.emit(remaining)
-        elif event.key() in (Qt.Key_Return,Qt.Key_Enter) and self.mode=="erase":
-            finished=self.selected; finished_item=self.masks[finished] if 0<=finished<len(self.masks) else None; self.masks_changed.emit(); self.clear_mask_selection(); self.status.emit("当前实例已完成；继续绘制会创建新实例")
-            if finished_item is not None and int(finished_item["mask"].sum())<10:self.small_mask_finished.emit(finished,int(finished_item["mask"].sum()))
+        elif event.key() in (Qt.Key_Return,Qt.Key_Enter) and self.mode in {"brush","erase"}:self.finish_current_instance()
         else: super().keyPressEvent(event)
 
 
@@ -601,7 +610,7 @@ class MainWindow(QMainWindow):
         draw_prompt=QPushButton("绘制 Mask Prompt"); draw_prompt.clicked.connect(self.draw_mask_prompt); mp.addWidget(draw_prompt)
         clear_prompt=QPushButton("清除 Mask Prompt"); clear_prompt.clicked.connect(self.clear_mask_prompt); mp.addWidget(clear_prompt); self.mask_prompt_controls.setVisible(False); rl.addWidget(self.mask_prompt_controls)
         rl.addWidget(self.run_sam_btn)
-        rl.addWidget(QLabel("标注实例（Ctrl 可多选）")); self.mask_list=QListWidget(); self.mask_list.setSelectionMode(QAbstractItemView.ExtendedSelection); self.mask_list.currentRowChanged.connect(self.select_mask); self.mask_list.itemClicked.connect(lambda item:self.select_mask(self.mask_list.row(item))); rl.addWidget(self.mask_list)
+        rl.addWidget(QLabel("标注实例（Ctrl 可多选）")); self.mask_list=QListWidget(); self.mask_list.setSelectionMode(QAbstractItemView.ExtendedSelection); self.mask_list.setContextMenuPolicy(Qt.CustomContextMenu); self.mask_list.customContextMenuRequested.connect(self.show_mask_context_menu); self.mask_list.currentRowChanged.connect(self.select_mask); self.mask_list.itemClicked.connect(lambda item:self.select_mask(self.mask_list.row(item))); rl.addWidget(self.mask_list)
         apply_cat=QPushButton("将当前标签分配给选中实例"); apply_cat.clicked.connect(self.apply_labels_to_selected); rl.addWidget(apply_cat)
         delete=QPushButton("删除选中实例 Delete"); delete.clicked.connect(self.delete_mask); rl.addWidget(delete)
         merge=QPushButton("合并所选 Masks 为一个实例"); merge.clicked.connect(self.merge_masks); rl.addWidget(merge)
@@ -997,19 +1006,15 @@ class MainWindow(QMainWindow):
     def push_undo(self):
         self.mark_current_dirty()
         self.undo_stack.append(self._mask_snapshot()); self.undo_stack=self.undo_stack[-50:]; self.redo_stack.clear()
+        self.view.detach_selected_mask()
     def _mask_snapshot(self):
         snapshot=[]
         for item in self.masks:
-            saved={key:copy.deepcopy(value) for key,value in item.items() if key!="mask"}; mask=np.asarray(item["mask"],dtype=bool)
-            saved["__packed_mask__"]=np.packbits(mask,axis=None); saved["__mask_shape__"]=mask.shape; snapshot.append(saved)
+            saved={key:copy.deepcopy(value) for key,value in item.items() if key!="mask"}; saved["mask"]=item["mask"]; snapshot.append(saved)
         return snapshot
     @staticmethod
     def _restore_snapshot(snapshot):
-        restored=[]
-        for saved in snapshot:
-            item={key:copy.deepcopy(value) for key,value in saved.items() if key not in {"__packed_mask__","__mask_shape__"}}
-            count=int(np.prod(saved["__mask_shape__"])); item["mask"]=np.unpackbits(saved["__packed_mask__"],count=count).reshape(saved["__mask_shape__"]).astype(bool); restored.append(item)
-        return restored
+        return [{key:(value if key=="mask" else copy.deepcopy(value)) for key,value in saved.items()} for saved in snapshot]
     def undo(self):
         if not self.undo_stack:return
         self.mark_current_dirty()
@@ -1026,6 +1031,18 @@ class MainWindow(QMainWindow):
         self.push_undo()
         for row in rows:self.masks.pop(row)
         self.view.selected=-1; self.view.masks=self.masks; self.view.redraw(); self.refresh_masks()
+    def show_mask_context_menu(self,pos):
+        item=self.mask_list.itemAt(pos)
+        if item is None:return
+        if not item.isSelected():
+            self.mask_list.clearSelection(); item.setSelected(True); self.mask_list.setCurrentItem(item)
+        rows=sorted({entry.row() for entry in self.mask_list.selectedIndexes()})
+        if not rows:return
+        english=getattr(self,"ui_language","zh")=="en"; menu=QMenu(self.mask_list); action=menu.addAction("Delete Selected Labels" if english else "删除选中标签")
+        chosen=menu.exec(self.mask_list.viewport().mapToGlobal(pos))
+        if chosen is not action:return
+        message=(f"Delete {len(rows)} selected label(s)?" if english else f"删除选中的 {len(rows)} 个标签？")
+        if QMessageBox.question(self,"Delete Labels" if english else "删除标签",message,QMessageBox.Yes|QMessageBox.No,QMessageBox.No)==QMessageBox.Yes:self.delete_mask()
     def merge_masks(self):
         rows=sorted({x.row() for x in self.mask_list.selectedIndexes()})
         if len(rows)<2:self.statusBar().showMessage("请在实例列表中选择至少两个实例");return
