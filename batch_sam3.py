@@ -109,10 +109,12 @@ class BatchSam3Mixin:
             elif event.get("type") == "result":
                 try:
                     self._accept_batch_result(event["index"])
-                    self._batch_process.write(b"next\n")
+                    if self._batch_process is not None and not self._batch_cancelled:
+                        self._batch_process.write(b"next\n")
                 except Exception as exc:
                     self._batch_error = str(exc)
-                    self._batch_process.kill()
+                    if self._batch_process is not None:
+                        self._batch_process.kill()
 
     def _accept_batch_result(self, position):
         if position in self._batch_completed or not 0 <= position < len(self._batch_rows):
@@ -144,10 +146,10 @@ class BatchSam3Mixin:
             self.load_image(row)
         self._batch_completed.add(position)
         self.update_image_status(row)
-        self._batch_dialog.setValue(len(self._batch_completed))
         self._batch_dialog.setLabelText(self._batch_text(
             f"Saved {len(self._batch_completed)}/{len(self._batch_rows)}: {self.project.image_paths[row].name}",
             f"已保存 {len(self._batch_completed)}/{len(self._batch_rows)}：{self.project.image_paths[row].name}"))
+        self._batch_dialog.setValue(len(self._batch_completed))
 
     def cancel_selected_batch(self):
         self._batch_cancelled = True
