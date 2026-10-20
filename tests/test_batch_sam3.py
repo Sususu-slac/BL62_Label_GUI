@@ -17,21 +17,27 @@ from app import MainWindow
 from app_en import MainWindow as EnglishMainWindow
 
 FAKE_WORKER = '''
-import argparse,json,sys,time
+import json,sys,time
 from pathlib import Path
 import numpy as np
 from PIL import Image
-p=argparse.ArgumentParser();p.add_argument('--batch');p.add_argument('--output');a,_=p.parse_known_args()
-for i,path in enumerate(json.loads(Path(a.batch).read_text())):
+print(json.dumps({'type':'ready'}),flush=True)
+for i,line in enumerate(sys.stdin):
+    request=json.loads(line)
+    with (Path(__file__).parent/'requests.jsonl').open('a') as log:log.write(json.dumps(request)+'\\n')
+    if MODE == 'slow':time.sleep(30)
     if MODE == 'failure' and i==1:sys.exit(1)
     if MODE == 'cancel' and i==1:time.sleep(30)
-    with Image.open(path) as image:w,h=image.size
+    path=Path(request['image'])
+    if path.suffix=='.npy':h,w=np.load(path).shape[:2]
+    else:
+        with Image.open(path) as image:w,h=image.size
     masks=np.zeros((1,h,w),bool);masks[:,4:10,5:11]=True
     if MODE == 'empty':masks=masks[:0]
-    np.savez(a.output,masks=masks,scores=np.ones(len(masks)))
-    print(json.dumps({'type':'result','index':i}),flush=True)
-    if sys.stdin.readline().strip()!='next':break
+    np.savez(request['output'],masks=masks,scores=np.ones(len(masks)))
+    print(json.dumps({'type':'result','id':request['id']}),flush=True)
 '''
+
 
 
 class BatchTest(unittest.TestCase):
@@ -54,7 +60,10 @@ class BatchTest(unittest.TestCase):
             self.window.project.reviewed.add(rec['id'])
         self.window.load_image(0)
         self.original = json.loads(json.dumps(self.window.project.data['annotations']))
-        self.patches=[patch('batch_sam3.QMessageBox.information'),patch('batch_sam3.QMessageBox.critical')]
+        worker=self.root/'fake.py';worker.write_text("MODE='success'\n"+FAKE_WORKER)
+        set_arguments=QProcess.setArguments
+        def fake_arguments(process,arguments):return set_arguments(process,[str(worker)]+arguments[1:])
+        self.patches=[patch.object(QProcess,'setArguments',fake_arguments),patch.object(MainWindow,'_update_sam_labels'),patch('batch_sam3.QMessageBox.information'),patch('batch_sam3.QMessageBox.critical'),patch('resident_sam3.valid_repository',return_value=True),patch('resident_sam3.valid_checkpoint',return_value=True),patch.object(MainWindow,'_model_key',return_value=('repo','checkpoint',0,0))]
         for p in self.patches:p.start()
 
     def tearDown(self):
@@ -65,12 +74,14 @@ class BatchTest(unittest.TestCase):
         self.temp.cleanup()
 
     def start(self, mode):
-        worker=self.root/'fake.py'
-        worker.write_text('MODE='+repr(mode)+'\n'+FAKE_WORKER)
-        original=QProcess.setArguments
-        def args(process, arguments):return original(process,[str(worker)]+arguments[1:])
-        with patch.object(QProcess,'setArguments',args):
-            self.window._start_selected_batch([0,2],'particle')
+        (self.root/'fake.py').write_text('MODE='+repr(mode)+'\n'+FAKE_WORKER)
+        self.window._start_selected_batch([0,2],'particle')
+
+    def wait_idle(self):
+        deadline=time.monotonic()+15
+        while self.window.sam_busy and time.monotonic()<deadline:
+            self.app.processEvents();time.sleep(.01)
+        self.assertFalse(self.window.sam_busy)
 
     def wait(self):
         deadline=time.monotonic()+15
@@ -141,6 +152,112 @@ class BatchTest(unittest.TestCase):
         self.assertTrue(self.window._batch_error)
         self.assertTrue(self.window.load_sam_btn.isEnabled())
         for row in range(3):self.assert_original(row)
+
+    def test_single_and_multiple_batches_reuse_one_model(self):
+        self.start('success');self.wait()
+        process=self.window._resident_process;pid=process.processId()
+        self.assertTrue(self.window.sam_loaded_flag)
+        self.assertEqual(self.window._resident_load_count,1)
+        self.window._sam_replace_requested=True
+        self.window.start_resident_single('particle');self.wait_idle()
+        self.assertEqual(self.window._resident_process.processId(),pid)
+        self.assertEqual(len(self.window.masks),1)
+        self.start('success');self.wait()
+        self.assertEqual(self.window._resident_process.processId(),pid)
+        self.assertEqual(self.window._resident_load_count,1)
+        self.assertTrue(self.window.release_sam_btn.isEnabled())
+
+    def test_release_and_next_run_reload(self):
+        self.start('success');self.wait();old_pid=self.window._resident_process.processId()
+        self.window.release_sam_btn.click()
+        self.assertIsNone(self.window._resident_process)
+        self.assertFalse(self.window.sam_loaded_flag)
+        self.assertFalse(self.window.release_sam_btn.isEnabled())
+        self.assertTrue(self.window.run_sam_btn.isEnabled())
+        self.start('success');self.wait()
+        self.assertNotEqual(self.window._resident_process.processId(),old_pid)
+        self.assertEqual(self.window._resident_load_count,2)
+
+    def test_configuration_change_reloads_and_explicit_load_reuses(self):
+        self.window.load_sam3();self.wait_idle()
+        old_pid=self.window._resident_process.processId()
+        self.window.sam_configuration_changed();self.wait_idle()
+        self.assertNotEqual(self.window._resident_process.processId(),old_pid)
+        self.assertEqual(self.window._resident_load_count,2)
+        pid=self.window._resident_process.processId()
+        self.window.load_sam3();self.wait_idle()
+        self.assertEqual(self.window._resident_process.processId(),pid)
+        self.assertEqual(self.window._resident_load_count,2)
+
+    def test_changed_checkpoint_key_reloads_before_next_request(self):
+        self.start('success');self.wait();old_pid=self.window._resident_process.processId()
+        with patch.object(MainWindow,'_model_key',return_value=('repo','new-checkpoint',1,1)):
+            self.start('success');self.wait()
+        self.assertNotEqual(self.window._resident_process.processId(),old_pid)
+        self.assertEqual(self.window._resident_load_count,2)
+
+    def test_idle_worker_crash_recovers_on_next_run(self):
+        self.start('success');self.wait();process=self.window._resident_process
+        process.kill();process.waitForFinished(3000);self.app.processEvents()
+        self.assertFalse(self.window.sam_loaded_flag)
+        self.assertIsNone(self.window._resident_process)
+        self.start('success');self.wait()
+        self.assertEqual(self.window._resident_load_count,2)
+
+    def test_single_cancel_keeps_original_labels_and_reloads_later(self):
+        (self.root/'fake.py').write_text("MODE='slow'\n"+FAKE_WORKER)
+        original_mask=self.window.masks[0]['mask'].copy()
+        self.window._sam_replace_requested=True
+        self.window.start_resident_single('particle')
+        self.assertTrue(self.window.sam_busy)
+        self.window.cancel_resident_task();self.wait_idle()
+        self.assertFalse(self.window._sam_replace_requested)
+        self.assertTrue(np.array_equal(original_mask,self.window.masks[0]['mask']))
+        self.assertIsNone(self.window._resident_process)
+        for row in range(3):self.assert_original(row)
+        self.start('success');self.wait()
+        self.assertTrue(self.window.sam_loaded_flag)
+
+    def test_resident_idle_allows_editing_saving_and_image_switching(self):
+        self.start('success');self.wait();pid=self.window._resident_process.processId()
+        self.assertFalse(self.window.sam_busy)
+        self.assertIsNone(getattr(self.window,'_sam_job_dialog',None))
+        self.assertIsNone(self.window._batch_dialog)
+        self.window.view.selected=0;self.window.push_undo()
+        self.window.view.set_mode('brush');self.window.view.drawing=True
+        self.window.view.paint_at(12,12);self.window.view._flush_live_redraw()
+        self.assertTrue(self.window.masks[0]['mask'][12,12])
+        self.window.view.set_mode('erase');self.window.view.paint_at(12,12)
+        self.window.view._flush_live_redraw();self.window.view.drawing=False
+        self.assertFalse(self.window.masks[0]['mask'][12,12])
+        self.window.save();self.window.images.setCurrentRow(1)
+        self.assertEqual(self.window.index,1)
+        self.window.images.setCurrentRow(0)
+        self.assertEqual(self.window.index,0)
+        self.assertTrue(self.window.sam_loaded_flag)
+        self.assertEqual(self.window._resident_process.processId(),pid)
+
+    def test_close_terminates_resident_worker(self):
+        self.start('success');self.wait();process=self.window._resident_process
+        self.window.project.dirty=False;self.window.close()
+        self.assertEqual(process.state(),QProcess.NotRunning)
+        self.assertIsNone(self.window._resident_process)
+
+    def test_changed_prompt_confidence_and_instance_inputs_share_worker(self):
+        self.window.load_sam3();self.wait_idle();pid=self.window._resident_process.processId()
+        self.window.confidence.setValue(75)
+        self.window.view.sam_box=(2,3,20,21)
+        self.window.mask_prompt=self.window.masks[0]['mask'].copy()
+        self.window.set_prompt_mode('mask')
+        self.window.start_resident_single('other prompt');self.wait_idle()
+        requests=[json.loads(line) for line in (self.root/'requests.jsonl').read_text().splitlines()]
+        self.assertEqual(requests[-1]['confidence'],.75)
+        self.assertEqual(requests[-1]['box'],[2,3,20,21])
+        self.assertEqual(requests[-1]['mode'],'instance')
+        self.assertEqual(requests[-1]['prompt'],'other prompt')
+        self.assertIn('exemplar',requests[-1])
+        self.assertEqual(self.window._resident_process.processId(),pid)
+        self.assertEqual(self.window._resident_load_count,1)
 
     def test_confirmation_defaults_to_cancel_and_leaves_labels(self):
         self.window.images.selectAll()

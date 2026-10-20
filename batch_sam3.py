@@ -1,12 +1,9 @@
-"""Selected-image SAM3 jobs, isolated from the GUI with one model per batch."""
-import json
-import os
-import sys
+"""Selected-image jobs using the shared resident SAM3 worker."""
 import tempfile
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QProcess, Qt
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMessageBox, QProgressDialog
 
 from sam3_setup import valid_checkpoint, valid_repository
@@ -23,8 +20,11 @@ class BatchSam3Mixin:
         multiple = count > 1
         ready = (not self.sam_busy and count > 0 and
                  ((multiple and self.prompt_mode == "text") or
-                  (not multiple and self.sam_loaded_flag and
+                  (not multiple and
                    (self.prompt_mode == "text" or self.mask_prompt is not None))))
+        self.load_sam_btn.setEnabled(not self.sam_busy)
+        if hasattr(self,"release_sam_btn"):
+            self.release_sam_btn.setEnabled(not self.sam_busy and getattr(self,"_resident_process",None) is not None)
         self.run_sam_btn.setEnabled(ready)
         self.run_sam_btn.setText(self._batch_text(
             f"Run SAM3 ({count} picture{'s' if count != 1 else ''})",
@@ -81,11 +81,11 @@ class BatchSam3Mixin:
             self._batch_prompt = prompt
             self._batch_category = self.current_category_id()
             self._batch_cancelled = False
+            self._batch_active = True
+            self._batch_confidence = self.confidence.value()/100
             self._batch_error = ""
             self._batch_stdout = ""
             self._batch_stderr = ""
-            manifest = folder / "batch.json"
-            manifest.write_text(json.dumps([str(self.project.image_paths[row]) for row in rows]), encoding="utf-8")
             self._batch_dialog = QProgressDialog(self._batch_text("Loading SAM3…", "正在加载 SAM3……"), self._batch_text("Cancel", "取消"), 0, len(rows), self)
             self._batch_dialog.setWindowTitle(self._batch_text("Run SAM3 for Selected Pictures", "对选中图片运行 SAM3"))
             self._batch_dialog.setWindowModality(Qt.ApplicationModal)
@@ -96,49 +96,49 @@ class BatchSam3Mixin:
             self.sam_busy = True
             self.update_run_button()
             self.load_sam_btn.setEnabled(False)
-            process = self._batch_process = QProcess(self)
-            process.setProgram(str(Path(sys.executable).with_name("python.exe")) if os.name == "nt" else sys.executable)
-            process.setArguments([str(Path(__file__).with_name("sam3_inference_process.py")),
-                "--repo", self.sam_repo, "--checkpoint", self.sam_checkpoint,
-                "--confidence", str(self.confidence.value()/100), "--prompt", prompt,
-                "--batch", str(manifest), "--output", str(folder / "result.npz")])
-            process.readyReadStandardOutput.connect(self._read_batch_output)
-            process.readyReadStandardError.connect(self._read_batch_error)
-            process.finished.connect(self._batch_finished)
-            process.errorOccurred.connect(self._batch_process_error)
-            process.start()
             self._batch_dialog.show()
+            self._next_batch_image()
         except Exception as exc:
             self._batch_error = str(exc)
             self._finish_selected_batch()
 
-    def _read_batch_error(self):
-        self._batch_stderr = (self._batch_stderr + bytes(self._batch_process.readAllStandardError()).decode("utf-8", errors="replace"))[-8000:]
+    def _next_batch_image(self):
+        if not self._batch_active:
+            return
+        position = len(self._batch_completed)
+        if position == len(self._batch_rows):
+            self._finish_selected_batch()
+            return
+        row = self._batch_rows[position]
+        self._batch_dialog.setLabelText(f"{position+1}/{len(self._batch_rows)}: {self.project.image_paths[row].name}")
+        request = {"image": str(self.project.image_paths[row]),
+            "output": str(Path(self._batch_temp.name)/"result.npz"),
+            "prompt": self._batch_prompt, "confidence": self._batch_confidence,
+            "mode": "text", "box": None}
+        try:
+            self._resident_request(request, lambda event: self._batch_result_ready(position),
+                self._batch_request_failed, self._batch_progress)
+            self._batch_process = getattr(self, "_resident_process", None)
+        except Exception as exc:
+            self._batch_request_failed(str(exc))
 
-    def _read_batch_output(self):
-        self._batch_stdout += bytes(self._batch_process.readAllStandardOutput()).decode("utf-8", errors="replace")
-        lines = self._batch_stdout.split("\n")
-        self._batch_stdout = lines.pop()
-        for line in lines:
-            try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            if self._batch_cancelled or self._batch_error:
-                continue
-            if event.get("type") == "progress":
-                self._batch_dialog.setLabelText(event["message"])
-            elif event.get("type") == "error":
-                self._batch_error = event["message"]
-            elif event.get("type") == "result":
-                try:
-                    self._accept_batch_result(event["index"])
-                    if self._batch_process is not None and not self._batch_cancelled:
-                        self._batch_process.write(b"next\n")
-                except Exception as exc:
-                    self._batch_error = str(exc)
-                    if self._batch_process is not None:
-                        self._batch_process.kill()
+    def _batch_progress(self, message):
+        if self._batch_dialog is not None:
+            self._batch_dialog.setLabelText(message)
+        self.sam_status.setText(message)
+
+    def _batch_result_ready(self, position):
+        try:
+            self._accept_batch_result(position)
+            if self._batch_active:
+                self._next_batch_image()
+        except Exception as exc:
+            self._batch_request_failed(str(exc))
+
+    def _batch_request_failed(self, message):
+        if message != "cancelled":
+            self._batch_error = message
+        self._finish_selected_batch()
 
     def _accept_batch_result(self, position):
         if position in self._batch_completed or not 0 <= position < len(self._batch_rows):
@@ -177,23 +177,14 @@ class BatchSam3Mixin:
 
     def cancel_selected_batch(self):
         self._batch_cancelled = True
-        process = getattr(self, "_batch_process", None)
-        if process is not None and process.state() != QProcess.NotRunning:
-            process.kill()
-
-    def _batch_process_error(self, error):
-        if error == QProcess.FailedToStart:
-            self._batch_error = self._batch_process.errorString()
+        if getattr(self, "_resident_success", None) is not None:
+            self._resident_abort("cancelled")
+        elif getattr(self, "_batch_active", False):
+            self._stop_resident()
             self._finish_selected_batch()
 
-    def _batch_finished(self, code, _status):
-        self._read_batch_output()
-        self._read_batch_error()
-        if not self._batch_cancelled and not self._batch_error and (code or len(self._batch_completed) != len(self._batch_rows)):
-            self._batch_error = self._batch_stderr or "SAM3 batch exited before all images were processed"
-        self._finish_selected_batch()
-
     def _finish_selected_batch(self):
+        self._batch_active = False
         self._batch_process = None
         if getattr(self, "_batch_dialog", None):
             self._batch_dialog.canceled.disconnect(self.cancel_selected_batch)

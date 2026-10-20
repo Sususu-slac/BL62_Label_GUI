@@ -6,12 +6,10 @@ variants always write exactly the same project format.
 from pathlib import Path
 import json
 import sys
-import tempfile
-import time
 
 from PIL import Image
 import numpy as np
-from PySide6.QtCore import Qt, QProcess, QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDialog, QFileDialog, QHBoxLayout, QInputDialog,
     QLabel, QLineEdit, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout)
@@ -73,22 +71,6 @@ class MainWindow(ChineseMainWindow):
         except Exception: pass
         self.view.status.connect(lambda text: self.statusBar().showMessage(STATUS.get(text, text)))
         self.statusBar().showMessage("Create a project from a folder or selected images; drag images here to add them to the current project")
-        self.inference_process = None
-        self.load_process = None
-        self.load_stdout = ""
-        self.task_cancelled = False
-        self.inference_temp = None
-        self.inference_stdout = ""
-        self.inference_started = 0.0
-        self.inference_timer = QTimer(self)
-        self.inference_timer.timeout.connect(self._update_inference_elapsed)
-        self.cancel_sam_btn = QPushButton("Cancel SAM3 Task")
-        self.cancel_sam_btn.setEnabled(False)
-        self.cancel_sam_btn.clicked.connect(self.cancel_sam_inference)
-        self.run_sam_btn.parentWidget().layout().insertWidget(
-            self.run_sam_btn.parentWidget().layout().indexOf(self.run_sam_btn) + 1,
-            self.cancel_sam_btn,
-        )
         self._update_sam_labels()
         QTimer.singleShot(0,self.ensure_sam3_configuration)
 
@@ -99,7 +81,7 @@ class MainWindow(ChineseMainWindow):
         if checkpoint:self.sam_checkpoint=checkpoint
         self._update_sam_labels()
         if valid_repository(self.sam_repo) and valid_checkpoint(self.sam_checkpoint):
-            self.statusBar().showMessage("SAM3 repository and checkpoint detected. Click Load SAM3 on GPU when ready.",8000)
+            self.statusBar().showMessage("SAM3 repository and checkpoint detected. Run SAM3 to load the model automatically.",8000)
         else:self.statusBar().showMessage("Select the SAM3 repository and checkpoint using the buttons above.",8000)
 
     def _update_sam_labels(self):
@@ -109,11 +91,11 @@ class MainWindow(ChineseMainWindow):
 
     def choose_sam_repo(self):
         name=QFileDialog.getExistingDirectory(self,"Select the folder containing the sam3 Python package",self.sam_repo)
-        if name:self.sam_repo=name; self._update_sam_labels()
+        if name:self.sam_repo=name; self.sam_configuration_changed()
 
     def choose_checkpoint(self):
         name,_=QFileDialog.getOpenFileName(self,"Select SAM3 checkpoint",str(Path(self.sam_checkpoint).parent),"PyTorch checkpoint (*.pt *.pth *.ckpt);;All files (*)")
-        if name:self.sam_checkpoint=name; self._update_sam_labels()
+        if name:self.sam_checkpoint=name; self.sam_configuration_changed()
 
     def new_project(self):
         self._choose_new_project(True)
@@ -157,135 +139,16 @@ class MainWindow(ChineseMainWindow):
         except Exception as exc:self.error(exc)
 
     def load_sam3(self):
-        if self.sam_busy:return
-        if not valid_repository(self.sam_repo) or not valid_checkpoint(self.sam_checkpoint):
-            QMessageBox.warning(self,"SAM3","Configure a valid SAM3 repository and checkpoint first.");return
-        self.task_cancelled=False; self.sam_busy=True; self.sam_loaded_flag=False; self.update_run_button(); self.load_sam_btn.setEnabled(False); self.cancel_sam_btn.setEnabled(True)
-        python=Path(sys.executable).with_name("python.exe"); worker=Path(__file__).with_name("sam3_inference_process.py")
-        self.load_stdout=""; self.inference_started=time.monotonic(); self.load_process=QProcess(self); self.load_process.setProgram(str(python))
-        self.load_process.setArguments([str(worker),"--repo",self.sam_repo,"--checkpoint",self.sam_checkpoint,"--confidence",str(self.confidence.value()/100),"--check-only"])
-        self.load_process.setProcessChannelMode(QProcess.SeparateChannels); self.load_process.readyReadStandardOutput.connect(self._read_load_output)
-        self.load_process.finished.connect(self._load_process_finished); self.load_process.start(); self.inference_timer.start(1000)
-        self.sam_status.setText("Loading SAM3 in an isolated process… The GUI remains responsive.")
-
-    def _read_load_output(self):
-        if not self.load_process:return
-        self.load_stdout += bytes(self.load_process.readAllStandardOutput()).decode("utf-8",errors="replace")
-        lines=self.load_stdout.split("\n"); self.load_stdout=lines.pop()
-        for line in lines:
-            try:item=json.loads(line)
-            except Exception:continue
-            if item.get("type")=="progress":self.sam_status.setText(item.get("message","Loading SAM3…"))
-
-    def _load_process_finished(self,code,_status):
-        self.inference_timer.stop(); self.cancel_sam_btn.setEnabled(False); self._read_load_output()
-        try:
-            if self.task_cancelled:
-                self.sam_busy=False; self.sam_loaded_flag=False; self.load_sam_btn.setEnabled(True); self.update_run_button(); self.sam_status.setText("SAM3 loading cancelled"); self.task_cancelled=False; return
-            if code!=0:
-                error=bytes(self.load_process.readAllStandardError()).decode("utf-8",errors="replace").strip()
-                raise RuntimeError(error or "The isolated SAM3 loading process failed")
-            self.sam_busy=False; self.sam_loaded_flag=True; self.load_sam_btn.setEnabled(True); self.update_run_button(); self.sam_status.setText("SAM3 load test completed successfully. Run SAM3 is enabled.")
-        except Exception as exc:
-            self.sam_busy=False; self.sam_loaded_flag=False; self.load_sam_btn.setEnabled(True); self.update_run_button(); self.sam_status.setText(f"SAM3 loading failed: {exc}"); QMessageBox.critical(self,"SAM3",self.sam_status.text())
-        finally:self.load_process=None
-
-    def sam_loaded(self,message):
-        english=(message.replace("SAM3 已加载：","SAM3 loaded: ")
-                 .replace("，耗时 ",", elapsed ").replace(" 秒"," s"))
-        self.sam_busy=False; self.sam_loaded_flag=True; self.load_sam_btn.setEnabled(True); self.update_run_button(); self.sam_status.setText(english)
-
-    def sam_progress(self,message):
-        english=(message.replace("正在导入 PyTorch 和 SAM3（首次约 5–10 秒）……","Importing PyTorch and SAM3 (first load may take 5–10 seconds)…")
-            .replace("正在读取 checkpoint 并加载到 GPU……","Reading checkpoint and loading it onto the GPU…")
-            .replace("正在提取图像特征","Extracting image features").replace("范围 ","region ").replace("正在执行 Text Prompt grounding……","Running Text Prompt grounding…")
-            .replace("正在执行 Mask Prompt grounding……","Running Mask Prompt grounding…").replace("推理完成，正在传回","Inference complete; returning").replace("个 Masks……"," masks…"))
-        self.sam_status.setText(english); self.statusBar().showMessage(english)
-
-    def sam_failed(self,message):
-        english=(message.replace("SAM3 加载失败：","SAM3 loading failed: ").replace("SAM3 推理失败：","SAM3 inference failed: ")
-            .replace("请先加载 SAM3 模型","Load the SAM3 model first")
-            .replace("请先指定或绘制一个 Mask Prompt","Select or draw a Mask Prompt first")
-            .replace("Mask Prompt 不在当前 SAM3 框范围内","The Mask Prompt is outside the current SAM3 box"))
-        self._sam_replace_requested=False; self._sam_replace_box=None
-        self.sam_busy=False; self.load_sam_btn.setEnabled(True); self.run_sam_btn.setEnabled(self.sam_engine.processor is not None); self.sam_status.setText(english); QMessageBox.critical(self,"SAM3",english)
+        self.load_resident_sam3()
 
     def run_sam3(self):
-        if self.view.array is None:return
+        if self.sam_busy or self.view.array is None:return
         prompt=self.prompt.currentText().strip()
         if self.prompt_mode=="text" and not prompt:QMessageBox.warning(self,"SAM3","The Text Prompt cannot be empty");return
         if self.prompt_mode=="mask" and self.mask_prompt is None:QMessageBox.warning(self,"SAM3","Select or draw a Mask Prompt first");return
         if not prompt:prompt=(self.project.category(self.current_category_id()) or {"name":"particle"})["name"]
         if not self._confirm_sam_replacement():return
-        self._start_isolated_inference(prompt)
-
-    def _start_isolated_inference(self, prompt):
-        self.task_cancelled=False; self.sam_busy=True; self.update_run_button(); self.cancel_sam_btn.setEnabled(True)
-        self.inference_temp=tempfile.TemporaryDirectory(prefix="bl62_sam3_")
-        folder=Path(self.inference_temp.name); image_path=folder/"image.npy"; output_path=folder/"result.npz"
-        np.save(image_path,self.view.array,allow_pickle=False)
-        python=Path(sys.executable).with_name("python.exe")
-        worker=Path(__file__).with_name("sam3_inference_process.py")
-        args=[str(worker),"--repo",self.sam_repo,"--checkpoint",self.sam_checkpoint,
-              "--image",str(image_path),"--output",str(output_path),"--prompt",prompt,
-              "--confidence",str(self.confidence.value()/100),
-              "--mode","instance" if self.prompt_mode=="mask" else "text"]
-        if self.prompt_mode=="mask":
-            exemplar_path=folder/"exemplar.npy"
-            np.save(exemplar_path,self.mask_prompt,allow_pickle=False)
-            args += ["--exemplar",str(exemplar_path)]
-        if self.view.sam_box:args += ["--box",json.dumps(self.view.sam_box)]
-        self.inference_stdout=""; self.inference_started=time.monotonic()
-        self.inference_process=QProcess(self); self.inference_process.setProgram(str(python)); self.inference_process.setArguments(args)
-        self.inference_process.setProcessChannelMode(QProcess.SeparateChannels)
-        self.inference_process.readyReadStandardOutput.connect(self._read_inference_output)
-        self.inference_process.finished.connect(lambda code,_status:self._text_inference_finished(code,output_path))
-        self.inference_process.start(); self.inference_timer.start(1000)
-        kind="Instance Prompt" if self.prompt_mode=="mask" else "Text Prompt"
-        self.sam_status.setText(f"Starting isolated SAM3 {kind} inference…")
-
-    def _read_inference_output(self):
-        self.inference_stdout += bytes(self.inference_process.readAllStandardOutput()).decode("utf-8",errors="replace")
-        lines=self.inference_stdout.split("\n"); self.inference_stdout=lines.pop()
-        for line in lines:
-            try:item=json.loads(line)
-            except Exception:continue
-            if item.get("type")=="progress":self.sam_status.setText(item["message"])
-
-    def _update_inference_elapsed(self):
-        process=self.inference_process or self.load_process
-        if process and process.state()!=QProcess.NotRunning:
-            base=self.sam_status.text().split("  [")[0]
-            self.sam_status.setText(f"{base}  [{time.monotonic()-self.inference_started:.0f} s]")
-
-    def _text_inference_finished(self, code, output_path):
-        self.inference_timer.stop(); self.cancel_sam_btn.setEnabled(False)
-        self._read_inference_output()
-        try:
-            if self.task_cancelled:
-                self._sam_replace_requested=False; self._sam_replace_box=None
-                self.sam_busy=False; self.update_run_button(); self.sam_status.setText("SAM3 inference cancelled"); self.task_cancelled=False; return
-            if code!=0 or not output_path.exists():
-                error=bytes(self.inference_process.readAllStandardError()).decode("utf-8",errors="replace").strip()
-                raise RuntimeError(error or "The isolated SAM3 process exited without a result")
-            result=np.load(output_path,allow_pickle=False)
-            self.sam_predicted(result["masks"],result["scores"].tolist())
-        except Exception as exc:
-            self._sam_replace_requested=False; self._sam_replace_box=None
-            self.sam_busy=False; self.update_run_button(); self.sam_status.setText(f"SAM3 inference failed: {exc}")
-            QMessageBox.critical(self,"SAM3",self.sam_status.text())
-        finally:
-            self.inference_process=None
-            if self.inference_temp:self.inference_temp.cleanup(); self.inference_temp=None
-
-    def cancel_sam_inference(self):
-        self.task_cancelled=True
-        if self.load_process and self.load_process.state()!=QProcess.NotRunning:
-            self.load_process.kill(); self.load_process.waitForFinished(3000)
-        if self.inference_process and self.inference_process.state()!=QProcess.NotRunning:
-            self.inference_process.kill(); self.inference_process.waitForFinished(3000)
-        self.inference_timer.stop(); self._sam_replace_requested=False; self._sam_replace_box=None; self.sam_busy=False; self.update_run_button(); self.cancel_sam_btn.setEnabled(False)
-        self.sam_status.setText("SAM3 task cancelled")
+        self.start_resident_single(prompt)
 
     def sam_predicted(self,masks,scores):
         self.push_undo(); prompt=self.prompt.currentText().strip()
@@ -405,15 +268,14 @@ class MainWindow(ChineseMainWindow):
         QMessageBox.critical(self,"Error",str(exc))
 
     def closeEvent(self,event):
-        if getattr(self,"_batch_process",None) is not None:event.ignore();return
+        if self.sam_busy:event.ignore();return
         if self.export_thread and self.export_thread.isRunning():QMessageBox.warning(self,"Export","Please cancel the export and wait for it to stop before closing.");event.ignore();return
         if self.open_thread and self.open_thread.isRunning():QMessageBox.warning(self,"Import Existing Project","Please wait for the project import to finish before closing.");event.ignore();return
         if self.project.dirty:
             answer=QMessageBox.question(self,"Save Changes","Save changes before closing?",QMessageBox.Yes|QMessageBox.No|QMessageBox.Cancel)
             if answer==QMessageBox.Cancel:event.ignore();return
             if answer==QMessageBox.Yes:self.save()
-        if (self.inference_process and self.inference_process.state()!=QProcess.NotRunning) or (self.load_process and self.load_process.state()!=QProcess.NotRunning):self.cancel_sam_inference()
-        self.sam_thread.quit(); self.sam_thread.wait(3000); event.accept()
+        self._stop_resident(); event.accept()
 
 
 if __name__ == "__main__":

@@ -45,19 +45,19 @@ class BrushPerformanceTest(unittest.TestCase):
  def test_english_save_shows_saved_confirmation(self):
   window=EnglishMainWindow();window.project.json_path=Path('annotations.json');window.project.dirty=False
   with patch.object(window,'commit_current'),patch.object(window.project,'save'),patch('app_en.QMessageBox.information') as notice:window.save();notice.assert_called_once_with(window,'Save Complete','Saved to:\nannotations.json')
-  window.project.dirty=False;window.sam_thread.quit();window.sam_thread.wait(3000);window.close()
+  window.project.dirty=False;window._stop_resident();window.close()
  def test_sam_box_replacement_keeps_labels_outside_box(self):
   window=MainWindow();inside=np.zeros((100,100),bool);inside[20:30,20:30]=True;outside=np.zeros((100,100),bool);outside[70:80,70:80]=True
   window.masks=[{'mask':inside},{'mask':outside}];window.view.masks=window.masks;window._sam_replace_requested=True;window._sam_replace_box=(10,10,40,40);window._apply_pending_sam_replacement()
-  self.assertEqual(len(window.masks),1);self.assertTrue(np.array_equal(window.masks[0]['mask'],outside));window.project.dirty=False;window.sam_thread.quit();window.sam_thread.wait(3000);window.close()
+  self.assertEqual(len(window.masks),1);self.assertTrue(np.array_equal(window.masks[0]['mask'],outside));window.project.dirty=False;window._stop_resident();window.close()
  def test_full_sam_replacement_clears_all_labels_only_on_success(self):
   window=MainWindow();window.masks=self.masks(4,100,100);window.view.masks=window.masks;window._sam_replace_requested=True;window._sam_replace_box=None
-  self.assertEqual(len(window.masks),4);window._apply_pending_sam_replacement();self.assertEqual(window.masks,[]);window.project.dirty=False;window.sam_thread.quit();window.sam_thread.wait(3000);window.close()
+  self.assertEqual(len(window.masks),4);window._apply_pending_sam_replacement();self.assertEqual(window.masks,[]);window.project.dirty=False;window._stop_resident();window.close()
  def test_packed_undo_redo(self):
   window=MainWindow();window.masks=self.masks(20,256,256);window.view.masks=window.masks;window.view.array=np.zeros((256,256,3),np.uint8);window.view.selected=0;original=window.masks[0]['mask'].copy();window.push_undo();window.masks[0]['mask'][100:110,100:110]=True;window.undo();self.assertTrue(np.array_equal(window.masks[0]['mask'],original));window.redo();self.assertTrue(window.masks[0]['mask'][105,105]);window.close()
  def test_copy_on_write_undo_is_responsive(self):
   window=MainWindow();window.masks=self.masks(100,1024,1024);window.view.set_image(np.zeros((1024,1024,3),np.uint8),window.masks);window.view.selected=0;started=time.perf_counter();window.push_undo();window.masks[0]['mask'][400:420,400:420]=True;window.undo();elapsed=time.perf_counter()-started
-  self.assertLess(elapsed,1.0,f'copy-on-write undo took {elapsed:.3f}s');window.project.dirty=False;window.sam_thread.quit();window.sam_thread.wait(3000);window.close()
+  self.assertLess(elapsed,1.0,f'copy-on-write undo took {elapsed:.3f}s');window.project.dirty=False;window._stop_resident();window.close()
  def test_right_click_finish_clears_current_brush_instance(self):
   view=AnnotationView();masks=self.masks(1,128,128);view.set_image(np.zeros((128,128,3),np.uint8),masks);view.set_mode('brush');view.selected=0;view.finish_current_instance();self.assertEqual(view.selected,-1);self.assertEqual(len(masks),1)
  def test_export_contains_current_coco_json(self):
@@ -68,7 +68,7 @@ class BrushPerformanceTest(unittest.TestCase):
     window.export_all();deadline=time.monotonic()+10
     while window.export_thread is not None and time.monotonic()<deadline:QApplication.processEvents();time.sleep(.01)
     QApplication.processEvents()
-   self.assertIsNone(window.export_thread,"background export did not clean up within 10 seconds");training=out/'training_dataset';auxiliary=out/'auxiliary_outputs';data=json.loads((training/'annotations.json').read_text(encoding='utf-8'));self.assertEqual(len(data['annotations']),1);self.assertEqual(data['annotations'][0]['category_id'],1);self.assertTrue((training/'images'/'slice.png').is_file());self.assertTrue((auxiliary/'project_state.json').is_file());self.assertTrue((auxiliary/'instance_labels'/'slice_instances.png').is_file());self.assertTrue((auxiliary/'previews'/'slice_preview.png').is_file());self.assertTrue((auxiliary/'dataset_statistics.csv').is_file());window.project.dirty=False;window.sam_thread.quit();window.sam_thread.wait(3000);window.deleteLater()
+   self.assertIsNone(window.export_thread,"background export did not clean up within 10 seconds");training=out/'training_dataset';auxiliary=out/'auxiliary_outputs';data=json.loads((training/'annotations.json').read_text(encoding='utf-8'));self.assertEqual(len(data['annotations']),1);self.assertEqual(data['annotations'][0]['category_id'],1);self.assertTrue((training/'images'/'slice.png').is_file());self.assertTrue((auxiliary/'project_state.json').is_file());self.assertTrue((auxiliary/'instance_labels'/'slice_instances.png').is_file());self.assertTrue((auxiliary/'previews'/'slice_preview.png').is_file());self.assertTrue((auxiliary/'dataset_statistics.csv').is_file());window.project.dirty=False;window._stop_resident();window.deleteLater()
  def test_export_cancel_marks_partial_output(self):
   with tempfile.TemporaryDirectory() as temp:
    root=Path(temp);source=root/'slice.png';Image.fromarray(np.zeros((16,16,3),np.uint8)).save(source);out=root/'out';worker=ExportWorker({'images':[{'id':1,'file_name':'slice.png','width':16,'height':16}],'annotations':[],'categories':[{'id':1,'name':'particle'}]},set(),[source],out);cancelled=[];worker.cancelled.connect(cancelled.append);worker.request_cancel();worker.run();self.assertEqual(cancelled,[str(out)]);self.assertTrue((out/'EXPORT_INCOMPLETE.txt').is_file())

@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
 
 from coco_project import CocoProject, mask_geometry
 from batch_sam3 import BatchSam3Mixin
+from resident_sam3 import ResidentSam3Mixin
 
 
 COLORS = [(255,75,75),(57,189,248),(75,220,120),(255,196,65),(190,100,255),(255,105,190),(75,230,220)]
@@ -425,71 +426,6 @@ class AnnotationView(QGraphicsView):
         else: super().keyPressEvent(event)
 
 
-class Sam3Engine(QObject):
-    loaded = Signal(str)
-    predicted = Signal(object, object)
-    failed = Signal(str)
-    progress = Signal(str)
-
-    def __init__(self):
-        super().__init__(); self.processor=None; self.device=None
-
-    @Slot(str,str,float)
-    def load_model(self, repo: str, checkpoint: str, confidence: float):
-        try:
-            import time
-            started=time.perf_counter(); self.progress.emit("正在导入 PyTorch 和 SAM3（首次约 5–10 秒）……")
-            repo_path=Path(repo).resolve(); ckpt=Path(checkpoint).resolve()
-            if not (repo_path/"sam3").is_dir(): raise FileNotFoundError(f"SAM3 Python package not found: {repo_path / 'sam3'}")
-            if not ckpt.is_file(): raise FileNotFoundError(f"Checkpoint not found: {ckpt}")
-            if str(repo_path) not in sys.path: sys.path.insert(0,str(repo_path))
-            import torch
-            if not torch.cuda.is_available(): raise RuntimeError("CUDA is not available in this SAM3 environment")
-            from sam3 import build_sam3_image_model
-            from sam3.model.sam3_image_processor import Sam3Processor
-            self.device="cuda"
-            self.progress.emit("正在读取 checkpoint 并加载到 GPU……")
-            model=build_sam3_image_model(checkpoint_path=str(ckpt),load_from_HF=False,device="cuda",eval_mode=True)
-            self.processor=Sam3Processor(model=model,device="cuda",confidence_threshold=confidence)
-            name=torch.cuda.get_device_name(0); mem=torch.cuda.get_device_properties(0).total_memory/(1024**3)
-            self.loaded.emit(f"SAM3 已加载：{name} ({mem:.1f} GB)，耗时 {time.perf_counter()-started:.1f} 秒")
-        except Exception as exc:self.failed.emit(f"SAM3 加载失败：{type(exc).__name__}: {exc}")
-
-    @Slot(object,str,float,object,str,object)
-    def predict(self, rgb, prompt: str, confidence: float, box, mode: str, exemplar):
-        try:
-            import time
-            started=time.perf_counter()
-            if self.processor is None: raise RuntimeError("请先加载 SAM3 模型")
-            import torch
-            self.processor.set_confidence_threshold(confidence)
-            full_h,full_w=rgb.shape[:2]
-            if box:
-                x0,y0,x1,y1=[int(v) for v in box]; x0=max(0,min(x0,full_w-1)); x1=max(x0+1,min(x1+1,full_w)); y0=max(0,min(y0,full_h-1)); y1=max(y0+1,min(y1+1,full_h))
-            else:x0,y0,x1,y1=0,0,full_w,full_h
-            cropped=rgb[y0:y1,x0:x1]
-            self.progress.emit(f"正在提取图像特征（范围 {x1-x0}×{y1-y0}）……")
-            with torch.inference_mode(), torch.autocast(device_type="cuda",dtype=torch.bfloat16):
-                state=self.processor.set_image(Image.fromarray(cropped))
-                if mode=="text":
-                    self.progress.emit("正在执行 Text Prompt grounding……"); state=self.processor.set_text_prompt(prompt=prompt,state=state)
-                else:
-                    if exemplar is None:raise RuntimeError("请先指定或绘制一个 Mask Prompt")
-                    exemplar_crop=np.asarray(exemplar,dtype=bool)[y0:y1,x0:x1]
-                    if not exemplar_crop.any():raise RuntimeError("Mask Prompt 不在当前 SAM3 框范围内")
-                    self.progress.emit("正在执行 Mask Prompt grounding……")
-                    state["backbone_out"].update(self.processor.model.backbone.forward_text(["visual"],device=self.device))
-                    state["geometric_prompt"]=self.processor.model._get_dummy_prompt()
-                    prompt_mask=torch.as_tensor(exemplar_crop,device=self.device,dtype=torch.float32).view(1,1,1,*exemplar_crop.shape)
-                    state["geometric_prompt"].append_masks(prompt_mask); state=self.processor._forward_grounding(state)
-            cropped_masks=state["masks"].squeeze(1).detach().cpu().numpy().astype(bool)
-            masks=np.zeros((len(cropped_masks),full_h,full_w),dtype=bool); masks[:,y0:y1,x0:x1]=cropped_masks
-            scores=state["scores"].detach().float().cpu().numpy().tolist()
-            self.progress.emit(f"推理完成，正在传回 {len(masks)} 个 Masks……")
-            self.predicted.emit(masks,scores)
-        except Exception as exc:self.failed.emit(f"SAM3 推理失败：{type(exc).__name__}: {exc}")
-
-
 class ProjectOpenWorker(QObject):
     completed = Signal(object)
     failed = Signal(str)
@@ -556,9 +492,7 @@ class ExportWorker(QObject):
             self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
-class MainWindow(BatchSam3Mixin, QMainWindow):
-    load_sam3_requested = Signal(str,str,float)
-    predict_sam3_requested = Signal(object,str,float,object,str,object)
+class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
     def __init__(self):
         super().__init__(); self.ui_language=getattr(self,"ui_language","zh"); self.setWindowTitle("Particle Label GUI — 2026-08-25"); self.resize(1550,930); self.setStyleSheet(THEME_QSS)
         icon_path=Path(__file__).with_name("BL62_Label.ico")
@@ -594,6 +528,7 @@ class MainWindow(BatchSam3Mixin, QMainWindow):
         self.ckpt_label=QLabel(); self.ckpt_label.setWordWrap(True); rl.addWidget(self.ckpt_label)
         choose_ckpt=QPushButton("选择 checkpoint"); choose_ckpt.clicked.connect(self.choose_checkpoint); rl.addWidget(choose_ckpt)
         self.load_sam_btn=QPushButton("加载 SAM3 到 GPU"); self.load_sam_btn.clicked.connect(self.load_sam3); rl.addWidget(self.load_sam_btn)
+        self.release_sam_btn=QPushButton(self._batch_text("Release GPU","释放 GPU")); self.release_sam_btn.clicked.connect(self.release_sam3); self.release_sam_btn.setEnabled(False); rl.addWidget(self.release_sam_btn)
         self.sam_status=QLabel("SAM3 未加载"); self.sam_status.setWordWrap(True); rl.addWidget(self.sam_status)
         rl.addWidget(QLabel("标签"))
         label_line=QHBoxLayout(); self.category_combo=QComboBox(); self.category_combo.setEditable(False); self.category_combo.currentIndexChanged.connect(self.sync_drawing_defaults); self.prompt=self.category_combo; label_line.addWidget(self.category_combo,1)
@@ -656,30 +591,19 @@ class MainWindow(BatchSam3Mixin, QMainWindow):
         try: defaults.update(json.loads(self.settings_path.read_text(encoding="utf-8")))
         except Exception: pass
         self.sam_repo=defaults["repo"]; self.sam_checkpoint=defaults["checkpoint"]; self._update_sam_labels()
-        self.sam_thread=QThread(self); self.sam_engine=Sam3Engine(); self.sam_engine.moveToThread(self.sam_thread)
-        self.load_sam3_requested.connect(self.sam_engine.load_model); self.predict_sam3_requested.connect(self.sam_engine.predict)
-        self.sam_engine.loaded.connect(self.sam_loaded); self.sam_engine.predicted.connect(self.sam_predicted); self.sam_engine.failed.connect(self.sam_failed); self.sam_engine.progress.connect(self.sam_progress); self.sam_thread.start()
+        self._resident_process=None; self._resident_key=None
 
     def _update_sam_labels(self):
         self.repo_label.setText(f"仓库：{self.sam_repo}"); self.ckpt_label.setText(f"Checkpoint：{self.sam_checkpoint}")
         self.settings_path.write_text(json.dumps({"repo":self.sam_repo,"checkpoint":self.sam_checkpoint},ensure_ascii=False,indent=2),encoding="utf-8")
     def choose_sam_repo(self):
         name=QFileDialog.getExistingDirectory(self,"选择包含 sam3 Python 包的仓库",self.sam_repo)
-        if name:self.sam_repo=name; self._update_sam_labels()
+        if name:self.sam_repo=name; self.sam_configuration_changed()
     def choose_checkpoint(self):
         name,_=QFileDialog.getOpenFileName(self,"选择 SAM3 checkpoint",str(Path(self.sam_checkpoint).parent),"PyTorch checkpoint (*.pt *.pth *.ckpt);;All files (*)")
-        if name:self.sam_checkpoint=name; self._update_sam_labels()
+        if name:self.sam_checkpoint=name; self.sam_configuration_changed()
     def load_sam3(self):
-        if self.sam_busy:return
-        self.sam_busy=True; self.load_sam_btn.setEnabled(False); self.sam_status.setText("正在后台加载 SAM3，请稍候……")
-        self.load_sam3_requested.emit(self.sam_repo,self.sam_checkpoint,self.confidence.value()/100)
-    def sam_progress(self,message):
-        self.sam_status.setText(message); self.statusBar().showMessage(message)
-    def sam_loaded(self,message):
-        self.sam_busy=False; self.sam_loaded_flag=True; self.load_sam_btn.setEnabled(True); self.update_run_button(); self.sam_status.setText(message)
-    def sam_failed(self,message):
-        self._sam_replace_requested=False; self._sam_replace_box=None
-        self.sam_busy=False; self.load_sam_btn.setEnabled(True); self.sam_loaded_flag=self.sam_engine.processor is not None; self.update_run_button(); self.sam_status.setText(message); QMessageBox.critical(self,"SAM3",message)
+        self.load_resident_sam3()
     def _confirm_sam_replacement(self):
         self._sam_replace_requested=False; self._sam_replace_box=None
         if not self.masks:return True
@@ -704,14 +628,13 @@ class MainWindow(BatchSam3Mixin, QMainWindow):
         else:self.masks.clear()
         self._sam_replace_requested=False; self._sam_replace_box=None
     def run_sam3(self):
-        if self.view.array is None:return
+        if self.sam_busy or self.view.array is None:return
         prompt=self.prompt.currentText().strip()
         if self.prompt_mode=="text" and not prompt:QMessageBox.warning(self,"SAM3","Text Prompt 不能为空");return
         if self.prompt_mode=="mask" and self.mask_prompt is None:QMessageBox.warning(self,"SAM3","请先选择或绘制一个 Mask Prompt");return
         if not prompt:prompt=(self.project.category(self.current_category_id()) or {"name":"particle"})["name"]
         if not self._confirm_sam_replacement():return
-        self.sam_busy=True; self.run_sam_btn.setEnabled(False); self.sam_status.setText("SAM3 正在后台推理……")
-        self.predict_sam3_requested.emit(self.view.array.copy(),prompt,self.confidence.value()/100,self.view.sam_box,self.prompt_mode,None if self.mask_prompt is None else self.mask_prompt.copy())
+        self.start_resident_single(prompt)
     def sam_predicted(self,masks,scores):
         self.push_undo(); prompt=self.prompt.currentText().strip(); category_id=self.current_category_id()
         self._apply_pending_sam_replacement()
@@ -1115,14 +1038,14 @@ class MainWindow(BatchSam3Mixin, QMainWindow):
         self.export_worker=None;self.export_thread=None;self.export_dialog=None
     def error(self,e):QMessageBox.critical(self,"错误",str(e))
     def closeEvent(self,event):
-        if getattr(self,"_batch_process",None) is not None:event.ignore();return
+        if self.sam_busy:event.ignore();return
         if self.export_thread and self.export_thread.isRunning():QMessageBox.warning(self,"Export","Please cancel the export and wait for it to stop before closing." if getattr(self,"ui_language","zh")=="en" else "请先取消导出并等待任务停止后再关闭窗口。");event.ignore();return
         if self.open_thread and self.open_thread.isRunning():QMessageBox.warning(self,"Import Existing Project" if getattr(self,"ui_language","zh")=="en" else "导入已有项目","Please wait for the project import to finish before closing." if getattr(self,"ui_language","zh")=="en" else "请等待项目导入完成后再关闭。");event.ignore();return
         if self.project.dirty:
             ans=QMessageBox.question(self,"保存更改","关闭前保存更改吗？",QMessageBox.Yes|QMessageBox.No|QMessageBox.Cancel)
             if ans==QMessageBox.Cancel:event.ignore();return
             if ans==QMessageBox.Yes:self.save()
-        self.sam_thread.quit(); self.sam_thread.wait(3000); event.accept()
+        self._stop_resident(); event.accept()
 
 
 if __name__=="__main__":

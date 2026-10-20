@@ -25,7 +25,10 @@ Configuration is saved locally in `sam3_settings.json`, which is excluded from G
 - Drag images into an open project to add them.
 - Use one unified **Label** for both the SAM3 text prompt and COCO category.
 - Use the single **Run SAM3 (N pictures)** button (also available in the image list right-click menu). Select one image for the existing Text / Box / Instance Prompt workflow. Ctrl/Shift-select multiple images for batch Text Prompt inference. Confirm that **all existing labels, including manual labels**, will be replaced on the selected images. This uses the current Text Prompt, category, and confidence on full images, without the current SAM3 Box.
-- The batch loads the model once and saves each successful image automatically. Cancel or failure preserves unfinished images and completed results. A successful prediction with zero detections clears that image’s labels. Reprocessed images are marked unreviewed.
+- The first run loads SAM3 in a persistent background process. Single images, batches, Text / Box / Instance Prompts, and later runs reuse the same model. **Load SAM3 on GPU** optionally preloads it; it now keeps the model loaded.
+- **Release GPU** unloads the worker. The next run reloads automatically. Changing the repository/checkpoint reloads an already loaded model; closing the application releases it. Changing the prompt or confidence does not reload the model.
+- Inference and loading use a modal progress window to protect the labels being processed. Editing, switching images, saving and exporting remain available while the model is idle. Cancelling an active task terminates the worker and releases GPU memory; the next run reloads.
+- The batch saves each successful image automatically. Cancel or failure preserves unfinished images and completed results. A successful prediction with zero detections clears that image’s labels. Reprocessed images are marked unreviewed.
 - Save and export the training dataset from the GUI.
 
 ## Development
