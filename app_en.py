@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDialog, QFileDi
 
 from app import MainWindow as ChineseMainWindow
 from coco_project import mask_geometry
-from sam3_setup import detect_checkpoint, detect_repository, diagnostic, save_settings, valid_checkpoint, valid_repository
+from sam3_setup import detect_checkpoint, detect_repository, valid_checkpoint, valid_repository
 
 
 TRANSLATIONS = {
@@ -33,6 +33,7 @@ TRANSLATIONS = {
     "选择 SAM3 仓库": "Select SAM3 Repository", "选择 checkpoint": "Select Checkpoint",
     "Noun phrase / SAM3 提示词": "Noun Phrase / SAM3 Prompt", "置信度": "Confidence", "SAM3 未加载": "SAM3 not loaded",
     "加载 SAM3 到 GPU": "Load SAM3 on GPU",
+    "对选中图片运行 SAM3": "Run SAM3 for Selected Pictures",
     "标签": "Label", "管理标签": "Manage Labels",
     "运行 SAM3（文本 + 可选框）": "Run SAM3 (Text + Optional Box)",
     "清除 SAM3 框": "Clear SAM3 Box", "标注实例（Ctrl 可多选）": "Annotations (Ctrl: multi-select)",
@@ -89,9 +90,6 @@ class MainWindow(ChineseMainWindow):
             self.cancel_sam_btn,
         )
         self._update_sam_labels()
-        self.sam_setup_btn=QPushButton("SAM3 Setup & GPU Test")
-        self.sam_setup_btn.clicked.connect(self.configure_sam3)
-        layout=self.load_sam_btn.parentWidget().layout(); layout.insertWidget(layout.indexOf(self.load_sam_btn)+1,self.sam_setup_btn)
         QTimer.singleShot(0,self.ensure_sam3_configuration)
 
     def ensure_sam3_configuration(self):
@@ -102,36 +100,7 @@ class MainWindow(ChineseMainWindow):
         self._update_sam_labels()
         if valid_repository(self.sam_repo) and valid_checkpoint(self.sam_checkpoint):
             self.statusBar().showMessage("SAM3 repository and checkpoint detected. Click Load SAM3 on GPU when ready.",8000)
-        else:self.configure_sam3()
-
-    def configure_sam3(self):
-        dialog=QDialog(self); dialog.setWindowTitle("SAM3 Setup & GPU Test"); dialog.resize(760,340); layout=QVBoxLayout(dialog)
-        layout.addWidget(QLabel("Select an existing SAM3 repository and compatible checkpoint. They are not bundled with this application."))
-        repo_row=QHBoxLayout(); repo=QLineEdit(self.sam_repo); repo_row.addWidget(repo,1); browse_repo=QPushButton("Browse Repository"); repo_row.addWidget(browse_repo); layout.addWidget(QLabel("SAM3 Repository")); layout.addLayout(repo_row)
-        ckpt_row=QHBoxLayout(); checkpoint=QLineEdit(self.sam_checkpoint); ckpt_row.addWidget(checkpoint,1); browse_checkpoint=QPushButton("Browse Checkpoint"); ckpt_row.addWidget(browse_checkpoint); layout.addWidget(QLabel("Checkpoint")); layout.addLayout(ckpt_row)
-        status=QLabel(); status.setWordWrap(True); layout.addWidget(status)
-        def browse_r():
-            value=QFileDialog.getExistingDirectory(dialog,"Select SAM3 repository",repo.text())
-            if value:repo.setText(value)
-        def browse_c():
-            value,_=QFileDialog.getOpenFileName(dialog,"Select SAM3 checkpoint",str(Path(checkpoint.text()).parent),"Model checkpoint (*.pt *.pth *.ckpt)")
-            if value:checkpoint.setText(value)
-        def auto_detect():
-            found_repo=detect_repository(Path(__file__).resolve().parent,repo.text()); found_checkpoint=detect_checkpoint(Path(__file__).resolve().parent,found_repo,checkpoint.text())
-            if found_repo:repo.setText(found_repo)
-            if found_checkpoint:checkpoint.setText(found_checkpoint)
-            run_test()
-        def run_test():
-            lines=[]
-            for name,ok,detail in diagnostic(repo.text().strip(),checkpoint.text().strip()):lines.append(("PASS" if ok else "FAIL")+f" — {name}: {detail}")
-            status.setText("\n".join(lines))
-        def save():
-            if not valid_repository(repo.text().strip()):QMessageBox.warning(dialog,"SAM3 Setup","The selected repository is not a valid SAM3 source folder.");return
-            if not valid_checkpoint(checkpoint.text().strip()):QMessageBox.warning(dialog,"SAM3 Setup","Select a valid checkpoint larger than 100 MB.");return
-            self.sam_repo=repo.text().strip(); self.sam_checkpoint=checkpoint.text().strip(); self._update_sam_labels(); dialog.accept()
-        browse_repo.clicked.connect(browse_r); browse_checkpoint.clicked.connect(browse_c)
-        buttons=QHBoxLayout(); detect_btn=QPushButton("Auto Detect"); detect_btn.clicked.connect(auto_detect); buttons.addWidget(detect_btn); test_btn=QPushButton("Run GPU Test"); test_btn.clicked.connect(run_test); buttons.addWidget(test_btn); buttons.addStretch(); later=QPushButton("Configure Later"); later.clicked.connect(dialog.reject); buttons.addWidget(later); save_btn=QPushButton("Save Configuration"); save_btn.clicked.connect(save); buttons.addWidget(save_btn); layout.addLayout(buttons)
-        run_test(); dialog.exec()
+        else:self.statusBar().showMessage("Select the SAM3 repository and checkpoint using the buttons above.",8000)
 
     def _update_sam_labels(self):
         self.repo_label.setText(f"Repository: {self.sam_repo}")
@@ -190,7 +159,7 @@ class MainWindow(ChineseMainWindow):
     def load_sam3(self):
         if self.sam_busy:return
         if not valid_repository(self.sam_repo) or not valid_checkpoint(self.sam_checkpoint):
-            QMessageBox.warning(self,"SAM3","Configure a valid SAM3 repository and checkpoint first.");self.configure_sam3();return
+            QMessageBox.warning(self,"SAM3","Configure a valid SAM3 repository and checkpoint first.");return
         self.task_cancelled=False; self.sam_busy=True; self.sam_loaded_flag=False; self.update_run_button(); self.load_sam_btn.setEnabled(False); self.cancel_sam_btn.setEnabled(True)
         python=Path(sys.executable).with_name("python.exe"); worker=Path(__file__).with_name("sam3_inference_process.py")
         self.load_stdout=""; self.inference_started=time.monotonic(); self.load_process=QProcess(self); self.load_process.setProgram(str(python))
@@ -341,6 +310,7 @@ class MainWindow(ChineseMainWindow):
         self.prompt_mode=mode; self.text_prompt_btn.setChecked(mode=="text"); self.mask_prompt_btn.setChecked(mode=="mask"); self.mask_prompt_controls.setVisible(mode=="mask"); self.update_run_button(); self.statusBar().showMessage("Text Prompt mode" if mode=="text" else "Instance Prompt mode: use a selected instance or draw a prompt mask")
 
     def update_run_button(self):
+        self.update_batch_button()
         ready=self.sam_loaded_flag and not self.sam_busy and (self.prompt_mode=="text" or self.mask_prompt is not None); self.run_sam_btn.setEnabled(ready); self.run_sam_btn.setText("Run SAM3 — Text Prompt" if self.prompt_mode=="text" else "Run SAM3 — Instance Prompt")
 
     def use_selected_as_mask_prompt(self):
@@ -436,6 +406,7 @@ class MainWindow(ChineseMainWindow):
         QMessageBox.critical(self,"Error",str(exc))
 
     def closeEvent(self,event):
+        if getattr(self,"_batch_process",None) is not None:event.ignore();return
         if self.export_thread and self.export_thread.isRunning():QMessageBox.warning(self,"Export","Please cancel the export and wait for it to stop before closing.");event.ignore();return
         if self.open_thread and self.open_thread.isRunning():QMessageBox.warning(self,"Import Existing Project","Please wait for the project import to finish before closing.");event.ignore();return
         if self.project.dirty:

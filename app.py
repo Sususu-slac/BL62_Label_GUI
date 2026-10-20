@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
     QVBoxLayout, QWidget)
 
 from coco_project import CocoProject, mask_geometry
+from batch_sam3 import BatchSam3Mixin
 
 
 COLORS = [(255,75,75),(57,189,248),(75,220,120),(255,196,65),(190,100,255),(255,105,190),(75,230,220)]
@@ -555,7 +556,7 @@ class ExportWorker(QObject):
             self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
-class MainWindow(QMainWindow):
+class MainWindow(BatchSam3Mixin, QMainWindow):
     load_sam3_requested = Signal(str,str,float)
     predict_sam3_requested = Signal(object,str,float,object,str,object)
     def __init__(self):
@@ -610,6 +611,7 @@ class MainWindow(QMainWindow):
         draw_prompt=QPushButton("绘制 Mask Prompt"); draw_prompt.clicked.connect(self.draw_mask_prompt); mp.addWidget(draw_prompt)
         clear_prompt=QPushButton("清除 Mask Prompt"); clear_prompt.clicked.connect(self.clear_mask_prompt); mp.addWidget(clear_prompt); self.mask_prompt_controls.setVisible(False); rl.addWidget(self.mask_prompt_controls)
         rl.addWidget(self.run_sam_btn)
+        self.batch_sam_btn=QPushButton("对选中图片运行 SAM3"); self.batch_sam_btn.clicked.connect(self.run_sam3_selected); rl.addWidget(self.batch_sam_btn)
         rl.addWidget(QLabel("标注实例（Ctrl 可多选）")); self.mask_list=QListWidget(); self.mask_list.setSelectionMode(QAbstractItemView.ExtendedSelection); self.mask_list.setContextMenuPolicy(Qt.CustomContextMenu); self.mask_list.customContextMenuRequested.connect(self.show_mask_context_menu); self.mask_list.currentRowChanged.connect(self.select_mask); self.mask_list.itemClicked.connect(lambda item:self.select_mask(self.mask_list.row(item))); rl.addWidget(self.mask_list)
         apply_cat=QPushButton("将当前标签分配给选中实例"); apply_cat.clicked.connect(self.apply_labels_to_selected); rl.addWidget(apply_cat)
         delete=QPushButton("删除选中实例 Delete"); delete.clicked.connect(self.delete_mask); rl.addWidget(delete)
@@ -730,6 +732,7 @@ class MainWindow(QMainWindow):
         self.prompt_mode=mode; self.text_prompt_btn.setChecked(mode=="text"); self.mask_prompt_btn.setChecked(mode=="mask"); self.mask_prompt_controls.setVisible(mode=="mask"); self.update_run_button()
         self.statusBar().showMessage("Text Prompt 模式" if mode=="text" else "Mask Prompt 模式：请使用选中实例或绘制提示 Mask")
     def update_run_button(self):
+        self.update_batch_button()
         ready=self.sam_loaded_flag and not self.sam_busy and (self.prompt_mode=="text" or self.mask_prompt is not None); self.run_sam_btn.setEnabled(ready)
         self.run_sam_btn.setText("运行 SAM3 — Text Prompt" if self.prompt_mode=="text" else "运行 SAM3 — Mask Prompt")
     def use_selected_as_mask_prompt(self):
@@ -962,6 +965,7 @@ class MainWindow(QMainWindow):
             self.images.clearSelection(); item.setSelected(True); self.images.setCurrentItem(item)
         english=getattr(self,"ui_language","zh")=="en"
         menu=QMenu(self.images)
+        batch_action=menu.addAction("Run SAM3 for Selected Pictures" if english else "对选中图片运行 SAM3"); batch_action.setEnabled(not self.sam_busy and self.prompt_mode=="text"); batch_action.triggered.connect(self.run_sam3_selected)
         remove_action=menu.addAction("Remove from Project" if english else "从项目移除")
         remove_action.triggered.connect(self.remove_from_project)
         menu.exec(self.images.viewport().mapToGlobal(pos))
@@ -1113,6 +1117,7 @@ class MainWindow(QMainWindow):
         self.export_worker=None;self.export_thread=None;self.export_dialog=None
     def error(self,e):QMessageBox.critical(self,"错误",str(e))
     def closeEvent(self,event):
+        if getattr(self,"_batch_process",None) is not None:event.ignore();return
         if self.export_thread and self.export_thread.isRunning():QMessageBox.warning(self,"Export","Please cancel the export and wait for it to stop before closing." if getattr(self,"ui_language","zh")=="en" else "请先取消导出并等待任务停止后再关闭窗口。");event.ignore();return
         if self.open_thread and self.open_thread.isRunning():QMessageBox.warning(self,"Import Existing Project" if getattr(self,"ui_language","zh")=="en" else "导入已有项目","Please wait for the project import to finish before closing." if getattr(self,"ui_language","zh")=="en" else "请等待项目导入完成后再关闭。");event.ignore();return
         if self.project.dirty:

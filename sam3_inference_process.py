@@ -18,6 +18,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--batch", type=Path)
     parser.add_argument("--image", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--prompt", default="particle")
@@ -49,6 +50,27 @@ def main() -> int:
         processor = Sam3Processor(model=model, device="cuda", confidence_threshold=args.confidence)
         if args.check_only:
             print(json.dumps({"type": "done", "message": f"SAM3 loaded successfully on {torch.cuda.get_device_name(0)}"}), flush=True)
+            return 0
+        if args.batch:
+            if args.mode != "text" or args.box or not args.output:
+                raise ValueError("Batch inference requires full-image Text Prompt and an output path")
+            paths = json.loads(args.batch.read_text(encoding="utf-8"))
+            for index, path in enumerate(paths):
+                progress(f"{index+1}/{len(paths)}: {Path(path).name}")
+                with Image.open(path) as image:
+                    rgb = image.convert("RGB")
+                with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    state = processor.set_image(rgb)
+                    state = processor.set_text_prompt(prompt=args.prompt, state=state)
+                masks = state["masks"].squeeze(1).detach().cpu().numpy().astype(bool)
+                scores = state["scores"].detach().float().cpu().numpy()
+                np.savez(args.output, masks=masks, scores=scores)
+                del state, masks, scores
+                print(json.dumps({"type": "result", "index": index}), flush=True)
+                # Keep at most one full-resolution result on disk; wait until
+                # the GUI has safely saved it before processing the next image.
+                if sys.stdin.readline().strip() != "next":
+                    return 0
             return 0
         if not args.image or not args.image.is_file():
             raise FileNotFoundError("Input image array was not provided")

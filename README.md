@@ -8,7 +8,7 @@ GPU-assisted image annotation with SAM3 and COCO dataset export.
 2. Extract this repository to a local folder.
 3. Open Miniforge Prompt in that folder and run `install_windows.bat`.
 4. Start the application with `BL62 Label GUI.vbs`.
-5. On first launch, use **SAM3 Setup & GPU Test**. The application auto-detects common locations; otherwise browse to an existing SAM3 source repository and compatible checkpoint.
+5. The installer checks GPU/CUDA availability. On first launch, the application auto-detects common SAM3 locations; otherwise use **Select SAM3 Repository** and **Select Checkpoint**. There is no Setup / GPU Test dialog in the GUI.
 
 The installer creates the dedicated `BL62_Label_GUI` environment and does not modify other project environments.
 
@@ -24,6 +24,8 @@ Configuration is saved locally in `sam3_settings.json`, which is excluded from G
 - Drag images into an empty window to create a project.
 - Drag images into an open project to add them.
 - Use one unified **Label** for both the SAM3 text prompt and COCO category.
+- Ctrl/Shift-select images, then click **Run SAM3 for Selected Pictures** (also available in the image list right-click menu). Confirm that **all existing labels, including manual labels**, will be replaced on the selected images. This uses the current Text Prompt, category, and confidence on full images, without the current SAM3 Box.
+- The batch loads the model once and saves each successful image automatically. Cancel or failure preserves unfinished images and completed results. A successful prediction with zero detections clears that image’s labels. Reprocessed images are marked unreviewed.
 - Save and export the training dataset from the GUI.
 
 ## Development

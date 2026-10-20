@@ -39,7 +39,7 @@ echo.
 echo Installation completed successfully.
 echo A BL62 Label GUI shortcut was created on the Desktop.
 echo Double-click BL62 Label GUI.vbs to start without a console window.
-echo SAM3 and the checkpoint will be detected or requested on first launch.
+echo SAM3 and checkpoint paths are auto-detected; use the selection buttons if needed.
 pause
 exit /b 0
 
