@@ -586,6 +586,7 @@ class MainWindow(BatchSam3Mixin, QMainWindow):
         top.addStretch(); self.counter=QLabel("未打开项目"); top.addWidget(self.counter)
         split=QSplitter(); layout.addWidget(split,1)
         left=QWidget(); ll=QVBoxLayout(left); ll.addWidget(QLabel("图片（✓ 已审核，● 有标注）")); self.images=QListWidget(); self.images.setSelectionMode(QAbstractItemView.ExtendedSelection); self.images.setContextMenuPolicy(Qt.CustomContextMenu); self.images.customContextMenuRequested.connect(self.show_image_context_menu); self.images.currentRowChanged.connect(self.load_image); ll.addWidget(self.images); split.addWidget(left)
+        self.images.itemSelectionChanged.connect(self.update_run_button)
         self.view=AnnotationView(); self.view.changed.connect(self.push_undo); self.view.changed.connect(self.mark_current_dirty); self.view.selection_requested.connect(self.select_mask); self.view.masks_changed.connect(self.refresh_masks); self.view.masks_changed.connect(self.mark_current_dirty); self.view.instance_finished.connect(self.on_instance_finished); self.view.small_mask_finished.connect(self.confirm_small_mask); self.view.tool_reset_requested.connect(self.reset_tool); self.view.box_changed.connect(self.update_roi_status); self.view.status.connect(self.statusBar().showMessage); split.addWidget(self.view)
         right=QWidget(); rl=QVBoxLayout(right)
         rl.addWidget(QLabel("SAM3 GPU 辅助标注")); self.repo_label=QLabel(); self.repo_label.setWordWrap(True); rl.addWidget(self.repo_label)
@@ -603,7 +604,7 @@ class MainWindow(BatchSam3Mixin, QMainWindow):
             button.setCheckable(True); self.prompt_group.addButton(button); button.clicked.connect(lambda _,m=mode:self.set_prompt_mode(m)); prompt_buttons.addWidget(button)
         self.text_prompt_btn.setChecked(True); rl.addLayout(prompt_buttons)
         confline=QHBoxLayout(); confline.addWidget(QLabel("置信度")); self.confidence=QSpinBox(); self.confidence.setRange(1,99); self.confidence.setValue(50); self.confidence.setSuffix(" %"); confline.addWidget(self.confidence); rl.addLayout(confline)
-        self.run_sam_btn=QPushButton("运行 SAM3（文本 + 可选框）"); self.run_sam_btn.clicked.connect(self.run_sam3); self.run_sam_btn.setEnabled(False)
+        self.run_sam_btn=QPushButton("运行 SAM3（文本 + 可选框）"); self.run_sam_btn.clicked.connect(self.run_selected_or_current); self.run_sam_btn.setEnabled(False)
         self.roi_status=QLabel("搜索范围：全图"); rl.addWidget(self.roi_status); clear_box=QPushButton("清除 SAM3 框"); clear_box.clicked.connect(self.clear_sam_box); rl.addWidget(clear_box)
         self.mask_prompt_controls=QWidget(); mp=QVBoxLayout(self.mask_prompt_controls); mp.setContentsMargins(0,0,0,0)
         self.mask_prompt_status=QLabel("Mask Prompt：尚未设置"); self.mask_prompt_status.setWordWrap(True); mp.addWidget(self.mask_prompt_status)
@@ -611,7 +612,6 @@ class MainWindow(BatchSam3Mixin, QMainWindow):
         draw_prompt=QPushButton("绘制 Mask Prompt"); draw_prompt.clicked.connect(self.draw_mask_prompt); mp.addWidget(draw_prompt)
         clear_prompt=QPushButton("清除 Mask Prompt"); clear_prompt.clicked.connect(self.clear_mask_prompt); mp.addWidget(clear_prompt); self.mask_prompt_controls.setVisible(False); rl.addWidget(self.mask_prompt_controls)
         rl.addWidget(self.run_sam_btn)
-        self.batch_sam_btn=QPushButton("对选中图片运行 SAM3"); self.batch_sam_btn.clicked.connect(self.run_sam3_selected); rl.addWidget(self.batch_sam_btn)
         rl.addWidget(QLabel("标注实例（Ctrl 可多选）")); self.mask_list=QListWidget(); self.mask_list.setSelectionMode(QAbstractItemView.ExtendedSelection); self.mask_list.setContextMenuPolicy(Qt.CustomContextMenu); self.mask_list.customContextMenuRequested.connect(self.show_mask_context_menu); self.mask_list.currentRowChanged.connect(self.select_mask); self.mask_list.itemClicked.connect(lambda item:self.select_mask(self.mask_list.row(item))); rl.addWidget(self.mask_list)
         apply_cat=QPushButton("将当前标签分配给选中实例"); apply_cat.clicked.connect(self.apply_labels_to_selected); rl.addWidget(apply_cat)
         delete=QPushButton("删除选中实例 Delete"); delete.clicked.connect(self.delete_mask); rl.addWidget(delete)
@@ -733,8 +733,6 @@ class MainWindow(BatchSam3Mixin, QMainWindow):
         self.statusBar().showMessage("Text Prompt 模式" if mode=="text" else "Mask Prompt 模式：请使用选中实例或绘制提示 Mask")
     def update_run_button(self):
         self.update_batch_button()
-        ready=self.sam_loaded_flag and not self.sam_busy and (self.prompt_mode=="text" or self.mask_prompt is not None); self.run_sam_btn.setEnabled(ready)
-        self.run_sam_btn.setText("运行 SAM3 — Text Prompt" if self.prompt_mode=="text" else "运行 SAM3 — Mask Prompt")
     def use_selected_as_mask_prompt(self):
         index=self.view.selected
         if index<0 or index>=len(self.masks):QMessageBox.warning(self,"Mask Prompt","请先在图像或实例列表中选择一个实例");return
@@ -965,7 +963,7 @@ class MainWindow(BatchSam3Mixin, QMainWindow):
             self.images.clearSelection(); item.setSelected(True); self.images.setCurrentItem(item)
         english=getattr(self,"ui_language","zh")=="en"
         menu=QMenu(self.images)
-        batch_action=menu.addAction("Run SAM3 for Selected Pictures" if english else "对选中图片运行 SAM3"); batch_action.setEnabled(not self.sam_busy and self.prompt_mode=="text"); batch_action.triggered.connect(self.run_sam3_selected)
+        batch_action=menu.addAction(self.run_sam_btn.text()); batch_action.setEnabled(self.run_sam_btn.isEnabled()); batch_action.triggered.connect(self.run_selected_or_current)
         remove_action=menu.addAction("Remove from Project" if english else "从项目移除")
         remove_action.triggered.connect(self.remove_from_project)
         menu.exec(self.images.viewport().mapToGlobal(pos))

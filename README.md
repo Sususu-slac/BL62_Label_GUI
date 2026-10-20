@@ -24,7 +24,7 @@ Configuration is saved locally in `sam3_settings.json`, which is excluded from G
 - Drag images into an empty window to create a project.
 - Drag images into an open project to add them.
 - Use one unified **Label** for both the SAM3 text prompt and COCO category.
-- Ctrl/Shift-select images, then click **Run SAM3 for Selected Pictures** (also available in the image list right-click menu). Confirm that **all existing labels, including manual labels**, will be replaced on the selected images. This uses the current Text Prompt, category, and confidence on full images, without the current SAM3 Box.
+- Use the single **Run SAM3 (N pictures)** button (also available in the image list right-click menu). Select one image for the existing Text / Box / Instance Prompt workflow. Ctrl/Shift-select multiple images for batch Text Prompt inference. Confirm that **all existing labels, including manual labels**, will be replaced on the selected images. This uses the current Text Prompt, category, and confidence on full images, without the current SAM3 Box.
 - The batch loads the model once and saves each successful image automatically. Cancel or failure preserves unfinished images and completed results. A successful prediction with zero detections clears that image’s labels. Reprocessed images are marked unreviewed.
 - Save and export the training dataset from the GUI.
 

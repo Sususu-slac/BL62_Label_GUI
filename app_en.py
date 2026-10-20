@@ -311,7 +311,6 @@ class MainWindow(ChineseMainWindow):
 
     def update_run_button(self):
         self.update_batch_button()
-        ready=self.sam_loaded_flag and not self.sam_busy and (self.prompt_mode=="text" or self.mask_prompt is not None); self.run_sam_btn.setEnabled(ready); self.run_sam_btn.setText("Run SAM3 — Text Prompt" if self.prompt_mode=="text" else "Run SAM3 — Instance Prompt")
 
     def use_selected_as_mask_prompt(self):
         index=self.view.selected

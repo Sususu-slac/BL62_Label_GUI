@@ -17,8 +17,32 @@ class BatchSam3Mixin:
         return english if self.ui_language == "en" else chinese
 
     def update_batch_button(self):
-        if hasattr(self, "batch_sam_btn"):
-            self.batch_sam_btn.setEnabled(not self.sam_busy and self.prompt_mode == "text")
+        if not hasattr(self, "run_sam_btn"):
+            return
+        count = len(self.images.selectedIndexes())
+        multiple = count > 1
+        ready = (not self.sam_busy and count > 0 and
+                 ((multiple and self.prompt_mode == "text") or
+                  (not multiple and self.sam_loaded_flag and
+                   (self.prompt_mode == "text" or self.mask_prompt is not None))))
+        self.run_sam_btn.setEnabled(ready)
+        self.run_sam_btn.setText(self._batch_text(
+            f"Run SAM3 ({count} picture{'s' if count != 1 else ''})",
+            f"运行 SAM3（{count} 张图片）"))
+        self.run_sam_btn.setToolTip(self._batch_text(
+            "Select one image for Text / Box / Instance Prompt; select multiple images for full-image Text Prompt.",
+            "单张支持文字、Box 和实例提示；多张使用整图文字提示。"))
+
+    def run_selected_or_current(self):
+        if self.sam_busy:
+            return
+        rows = sorted({index.row() for index in self.images.selectedIndexes()})
+        if len(rows) > 1:
+            self.run_sam3_selected()
+        elif rows:
+            if self.index != rows[0]:
+                self.load_image(rows[0])
+            self.run_sam3()
 
     def run_sam3_selected(self):
         if self.sam_busy:

@@ -148,10 +148,29 @@ class BatchTest(unittest.TestCase):
             self.window.run_sam3_selected();start.assert_not_called()
         self.assertEqual(self.window.project.data['annotations'],self.original)
 
+    def test_unified_button_routes_selection_and_updates_count(self):
+        self.window.sam_loaded_flag=True
+        self.window.images.clearSelection()
+        self.window.images.item(0).setSelected(True)
+        self.assertTrue(self.window.run_sam_btn.isEnabled())
+        self.assertIn('1',self.window.run_sam_btn.text())
+        with patch.object(self.window,'run_sam3') as single,patch.object(self.window,'run_sam3_selected') as batch:
+            self.window.run_sam_btn.click();single.assert_called_once();batch.assert_not_called()
+            self.window.images.item(2).setSelected(True)
+            self.assertIn('2',self.window.run_sam_btn.text())
+            self.window.run_sam_btn.click();batch.assert_called_once()
+        self.window.set_prompt_mode('mask')
+        self.assertFalse(self.window.run_sam_btn.isEnabled())
+        self.window.set_prompt_mode('text')
+        self.assertTrue(self.window.run_sam_btn.isEnabled())
+        self.window.images.clearSelection()
+        self.assertFalse(self.window.run_sam_btn.isEnabled())
+
     def test_english_setup_gpu_test_removed(self):
         with patch.object(EnglishMainWindow,'_update_sam_labels'):
             window=EnglishMainWindow()
-        self.assertIn('Run SAM3 for Selected Pictures',[b.text() for b in window.findChildren(QPushButton)])
+        self.assertEqual(len([b for b in window.findChildren(QPushButton) if b.text().startswith('Run SAM3 (')]),1)
+        self.assertFalse(hasattr(window,'batch_sam_btn'))
         self.assertFalse(hasattr(window,'sam_setup_btn'))
         self.assertFalse(hasattr(window,'configure_sam3'))
         window.project.dirty=False;window.close()
