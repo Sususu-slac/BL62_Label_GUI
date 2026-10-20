@@ -29,6 +29,9 @@ Configuration is saved locally in `sam3_settings.json`, which is excluded from G
 - **Release GPU** unloads the worker. The next run reloads automatically. Changing the repository/checkpoint reloads an already loaded model; closing the application releases it. Changing the prompt or confidence does not reload the model.
 - Inference and loading use a modal progress window to protect the labels being processed. Editing, switching images, saving and exporting remain available while the model is idle. Cancelling an active task terminates the worker and releases GPU memory; the next run reloads.
 - The batch saves each successful image automatically. Cancel or failure preserves unfinished images and completed results. A successful prediction with zero detections clears that image’s labels. Reprocessed images are marked unreviewed.
+- **Auto Run after Box** is on by default. On one selected image, draw a SAM3 Box and release the left mouse button to append results with the current Text or Instance Prompt. Existing labels are kept, including overlapping or duplicate labels; no replacement confirmation is shown. Undo removes one completed addition. Turn the switch off to draw boxes without running inference.
+- In Instance Prompt mode, **Use Selected Instance** freezes a copy of the example and activates the box tool. Keep drawing boxes anywhere in the same image; the example may be outside the box and survives deletion or editing of its original label. Results are clipped to the requested box. Clear/set the example to change it; switching images clears it.
+- The ordinary Run button still asks to replace existing labels. Multi-image batch confirmation and replacement are unchanged.
 - Save and export the training dataset from the GUI.
 
 ## Development

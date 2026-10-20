@@ -13,7 +13,7 @@ import numpy as np
 from PIL import Image
 from PySide6.QtCore import QObject, QPointF, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QCursor, QIcon, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QComboBox, QDialog, QFileDialog, QFormLayout,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout,
     QGraphicsPathItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
     QMainWindow, QMenu, QMessageBox, QProgressDialog, QPushButton, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QToolBar,
     QVBoxLayout, QWidget)
@@ -349,7 +349,7 @@ class AnnotationView(QGraphicsView):
             self._background_key=None; self.drawing = True
             if not created:self.changed.emit()
             self.paint_at(x,y)
-        elif self.mode == "sam_box":
+        elif self.mode == "sam_box" and event.button()==Qt.LeftButton:
             self.box_start=(x,y); self.sam_box=(x,y,x,y); self.drawing=True; self.redraw()
 
     def mouseMoveEvent(self,event):
@@ -370,12 +370,17 @@ class AnnotationView(QGraphicsView):
     def mouseReleaseEvent(self,event):
         if event.button()==Qt.MiddleButton and self._middle_panning:
             self._middle_panning=False; self._middle_pan_pos=None; self._update_tool_cursor(); event.accept(); return
-        was_box=self.drawing and self.mode=="sam_box"
+        was_box=self.drawing and self.mode=="sam_box" and event.button()==Qt.LeftButton
         if self.mode in {"brush","erase"}:
             if self.drawing and 0<=self.selected<len(self.masks):self._commit_editing_overlay(self.selected)
             self.drawing=False;self._live_redraw_timer.stop();self._live_redraw_pending=False;self._editing_background=None;self._background_key=None;self._hit_signature=None;self.redraw()
         else:self.drawing=False
-        if was_box:self.box_changed.emit(self.sam_box)
+        if was_box:
+            pos=self.image_pos(event)
+            if pos:
+                x0,y0=self.box_start; x1,y1=pos
+                self.sam_box=(min(x0,x1),min(y0,y1),max(x0,x1),max(y0,y1)); self.redraw()
+            self.box_changed.emit(self.sam_box)
         super().mouseReleaseEvent(event)
 
     def paint_at(self,x,y):
@@ -521,7 +526,7 @@ class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
         split=QSplitter(); layout.addWidget(split,1)
         left=QWidget(); ll=QVBoxLayout(left); ll.addWidget(QLabel("图片（✓ 已审核，● 有标注）")); self.images=QListWidget(); self.images.setSelectionMode(QAbstractItemView.ExtendedSelection); self.images.setContextMenuPolicy(Qt.CustomContextMenu); self.images.customContextMenuRequested.connect(self.show_image_context_menu); self.images.currentRowChanged.connect(self.load_image); ll.addWidget(self.images); split.addWidget(left)
         self.images.itemSelectionChanged.connect(self.update_run_button)
-        self.view=AnnotationView(); self.view.changed.connect(self.push_undo); self.view.changed.connect(self.mark_current_dirty); self.view.selection_requested.connect(self.select_mask); self.view.masks_changed.connect(self.refresh_masks); self.view.masks_changed.connect(self.mark_current_dirty); self.view.instance_finished.connect(self.on_instance_finished); self.view.small_mask_finished.connect(self.confirm_small_mask); self.view.tool_reset_requested.connect(self.reset_tool); self.view.box_changed.connect(self.update_roi_status); self.view.status.connect(self.statusBar().showMessage); split.addWidget(self.view)
+        self.view=AnnotationView(); self.view.changed.connect(self.push_undo); self.view.changed.connect(self.mark_current_dirty); self.view.selection_requested.connect(self.select_mask); self.view.masks_changed.connect(self.refresh_masks); self.view.masks_changed.connect(self.mark_current_dirty); self.view.instance_finished.connect(self.on_instance_finished); self.view.small_mask_finished.connect(self.confirm_small_mask); self.view.tool_reset_requested.connect(self.reset_tool); self.view.box_changed.connect(self.update_roi_status); self.view.box_changed.connect(self.on_sam_box_finished); self.view.status.connect(self.statusBar().showMessage); split.addWidget(self.view)
         right=QWidget(); rl=QVBoxLayout(right)
         rl.addWidget(QLabel("SAM3 GPU 辅助标注")); self.repo_label=QLabel(); self.repo_label.setWordWrap(True); rl.addWidget(self.repo_label)
         choose_repo=QPushButton("选择 SAM3 仓库"); choose_repo.clicked.connect(self.choose_sam_repo); rl.addWidget(choose_repo)
@@ -541,6 +546,8 @@ class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
         confline=QHBoxLayout(); confline.addWidget(QLabel("置信度")); self.confidence=QSpinBox(); self.confidence.setRange(1,99); self.confidence.setValue(50); self.confidence.setSuffix(" %"); confline.addWidget(self.confidence); rl.addLayout(confline)
         self.run_sam_btn=QPushButton("运行 SAM3（文本 + 可选框）"); self.run_sam_btn.clicked.connect(self.run_selected_or_current); self.run_sam_btn.setEnabled(False)
         self.roi_status=QLabel("搜索范围：全图"); rl.addWidget(self.roi_status); clear_box=QPushButton("清除 SAM3 框"); clear_box.clicked.connect(self.clear_sam_box); rl.addWidget(clear_box)
+        self.auto_box_check=QCheckBox(self._batch_text("Auto Run after Box","框选后自动运行")); self.auto_box_check.setChecked(True)
+        self.auto_box_check.setToolTip(self._batch_text("Append results; keep all existing labels, including overlapping labels.","追加识别结果，保留全部原标签，允许重叠。")); rl.addWidget(self.auto_box_check)
         self.mask_prompt_controls=QWidget(); mp=QVBoxLayout(self.mask_prompt_controls); mp.setContentsMargins(0,0,0,0)
         self.mask_prompt_status=QLabel("Mask Prompt：尚未设置"); self.mask_prompt_status.setWordWrap(True); mp.addWidget(self.mask_prompt_status)
         use_prompt=QPushButton("使用当前选中实例"); use_prompt.clicked.connect(self.use_selected_as_mask_prompt); mp.addWidget(use_prompt)
@@ -649,6 +656,27 @@ class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
         if box:
             x0,y0,x1,y1=box; self.roi_status.setText(f"搜索范围：SAM3 框  x={x0}, y={y0}, w={x1-x0}, h={y1-y0}")
         else:self.roi_status.setText("搜索范围：全图")
+    def on_sam_box_finished(self, box):
+        # Defer until mouse release is fully handled before opening progress UI.
+        if box is None:return
+        row=self.index; bounds=tuple(box)
+        QTimer.singleShot(0,lambda:self._auto_run_sam_box(row,bounds))
+
+    def _auto_run_sam_box(self, row, box):
+        if not self.auto_box_check.isChecked() or self.sam_busy or row!=self.index:return
+        if self.view.array is None or self.view.sam_box is None or tuple(self.view.sam_box)!=box:return
+        if box[2]<=box[0] or box[3]<=box[1]:return
+        if len(self.images.selectedIndexes())!=1:
+            self.statusBar().showMessage(self._batch_text("Select one picture to use Auto Run after Box.","请只选择一张图片后框选。"));return
+        prompt=self.prompt.currentText().strip()
+        if self.prompt_mode=="mask" and self.mask_prompt is None:
+            self.sam_status.setText(self._batch_text("Set an Instance Prompt first, then draw a box.","请先设置参考实例，再框选区域。"));return
+        if self.prompt_mode=="text" and not prompt:
+            self.sam_status.setText(self._batch_text("Select a label for the Text Prompt first.","请先选择文字提示标签。"));return
+        if not prompt:prompt=(self.project.category(self.current_category_id()) or {"name":"particle"})["name"]
+        self._sam_replace_requested=False; self._sam_replace_box=None
+        self.start_resident_single(prompt,append_only=True)
+
     def clear_sam_box(self):self.view.sam_box=None; self.view.redraw(); self.update_roi_status(); self.statusBar().showMessage("SAM3 框已清除；搜索范围恢复为全图")
 
     def set_prompt_mode(self,mode):
@@ -660,6 +688,7 @@ class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
         index=self.view.selected
         if index<0 or index>=len(self.masks):QMessageBox.warning(self,"Mask Prompt","请先在图像或实例列表中选择一个实例");return
         self.mask_prompt=self.masks[index]["mask"].copy(); self.mask_prompt_source=f"实例 {index+1} / Ann ID {self.masks[index].get('id',0)}"; self.view.exemplar_mask=self.mask_prompt; self.view.redraw(); self.mask_prompt_status.setText(f"Mask Prompt：{self.mask_prompt_source}，面积 {int(self.mask_prompt.sum())} px"); self.update_run_button()
+        if self.prompt_mode=="mask":self.activate_tool("sam_box")
     def draw_mask_prompt(self):
         if self.view.array is None:QMessageBox.warning(self,"Mask Prompt","请先导入图片");return
         self.capture_mask_prompt=True; self.view.selected=-1; self.activate_tool("brush"); self.statusBar().showMessage("请用画笔绘制 Mask Prompt，按 Enter 完成")
@@ -669,6 +698,7 @@ class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
         answer=QMessageBox.question(self,"Mask Prompt","是否把刚绘制的 Mask Prompt 同时保存为正式实例？\n选择 No 将仅作为提示，不写入标注。",QMessageBox.Yes|QMessageBox.No)
         if answer==QMessageBox.No:self.push_undo(); self.masks.pop(index); self.view.masks=self.masks; self.refresh_masks()
         self.mask_prompt_status.setText(f"Mask Prompt：{self.mask_prompt_source}"); self.view.redraw(); self.update_run_button()
+        self.activate_tool("sam_box")
     def clear_mask_prompt(self):
         self.mask_prompt=None; self.mask_prompt_source=None; self.capture_mask_prompt=False; self.view.exemplar_mask=None; self.view.redraw(); self.mask_prompt_status.setText("Mask Prompt：尚未设置"); self.update_run_button()
 

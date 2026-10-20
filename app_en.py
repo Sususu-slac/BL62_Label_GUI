@@ -179,6 +179,7 @@ class MainWindow(ChineseMainWindow):
         index=self.view.selected
         if index<0 or index>=len(self.masks):QMessageBox.warning(self,"Mask Prompt","Select an instance in the image or instance list first");return
         self.mask_prompt=self.masks[index]["mask"].copy(); self.mask_prompt_source=f"Instance {index+1} / Ann ID {self.masks[index].get('id',0)}"; self.view.exemplar_mask=self.mask_prompt; self.view.redraw(); self.mask_prompt_status.setText(f"Mask Prompt: {self.mask_prompt_source}, area {int(self.mask_prompt.sum())} px"); self.update_run_button()
+        if self.prompt_mode=="mask":self.activate_tool("sam_box")
 
     def draw_mask_prompt(self):
         if self.view.array is None:QMessageBox.warning(self,"Mask Prompt","Import an image first");return
@@ -190,6 +191,7 @@ class MainWindow(ChineseMainWindow):
         answer=QMessageBox.question(self,"Mask Prompt","Also save the drawn Mask Prompt as a formal instance?\nChoose No to use it only as a prompt.",QMessageBox.Yes|QMessageBox.No)
         if answer==QMessageBox.No:self.masks.pop(index); self.view.masks=self.masks; self.view.selected=-1; self.refresh_masks()
         self.view.exemplar_mask=self.mask_prompt; self.mask_prompt_status.setText(f"Mask Prompt: {self.mask_prompt_source}"); self.view.redraw(); self.update_run_button()
+        self.activate_tool("sam_box")
 
     def clear_mask_prompt(self):
         self.mask_prompt=None; self.mask_prompt_source=None; self.capture_mask_prompt=False; self.view.exemplar_mask=None; self.view.redraw(); self.mask_prompt_status.setText("Mask Prompt: not set"); self.update_run_button()

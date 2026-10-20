@@ -191,12 +191,16 @@ class ResidentSam3Mixin:
     def cancel_resident_task(self):
         self._resident_abort('cancelled')
 
-    def start_resident_single(self, prompt):
+    def start_resident_single(self, prompt, append_only=False):
         if self.sam_busy:
             return
         self.sam_busy = True
         self.update_run_button()
         self._single_index = self.index
+        self._single_append_only = append_only
+        if append_only:
+            self._sam_replace_requested = False
+            self._sam_replace_box = None
         self._sam_job_dialog = self._sam_dialog(self._batch_text('Running SAM3…', '正在运行 SAM3……'), self.cancel_resident_task)
         try:
             self._single_temp = tempfile.TemporaryDirectory(prefix='bl62_sam3_single_')
@@ -220,7 +224,10 @@ class ResidentSam3Mixin:
                 masks, scores = result['masks'], result['scores']
                 if masks.ndim != 3 or masks.shape[1:] != self.view.array.shape[:2] or len(masks) != len(scores):
                     raise ValueError('SAM3 result dimensions do not match the image')
-                self.sam_predicted(masks, scores.tolist())
+                if self._single_append_only and not len(masks):
+                    self.sam_status.setText(self._batch_text("No masks found; existing labels kept.","未找到实例，原标签已保留。"))
+                else:
+                    self.sam_predicted(masks, scores.tolist())
             self._close_sam_job()
         except Exception as exc:
             self._single_failed(str(exc))

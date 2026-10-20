@@ -23,6 +23,20 @@ def predict_image(processor, torch, rgb, prompt, confidence, box=None, mode="tex
         y0=max(0,min(int(y0),full_h-1)); y1=max(y0+1,min(int(y1)+1,full_h))
     else:
         x0,y0,x1,y1=0,0,full_w,full_h
+    roi_x0,roi_y0,roi_x1,roi_y1=x0,y0,x1,y1
+    exemplar_full=None
+    if mode=="instance":
+        if not exemplar_path or not Path(exemplar_path).is_file():
+            raise RuntimeError("Instance Prompt mask was not provided")
+        exemplar_full=np.load(exemplar_path,allow_pickle=False).astype(bool)
+        if exemplar_full.shape!=(full_h,full_w) or not exemplar_full.any():
+            raise ValueError("Instance Prompt must be a non-empty mask for the current image")
+        # Geometry prompts are encoded against their source image features.
+        # Include the whole frozen example in the model's crop, even when it
+        # lies outside the requested ROI, then return only ROI-clipped masks.
+        ys,xs=np.nonzero(exemplar_full)
+        x0=min(x0,int(xs.min()));y0=min(y0,int(ys.min()))
+        x1=max(x1,int(xs.max())+1);y1=max(y1,int(ys.max())+1)
     cropped = rgb[y0:y1, x0:x1]
     progress(f"Extracting image features ({x1-x0}×{y1-y0})…")
     with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -31,11 +45,7 @@ def predict_image(processor, torch, rgb, prompt, confidence, box=None, mode="tex
             progress("Running Text Prompt grounding…")
             state = processor.set_text_prompt(prompt=prompt, state=state)
         else:
-            if not exemplar_path or not Path(exemplar_path).is_file():
-                raise RuntimeError("Instance Prompt mask was not provided")
-            exemplar = np.load(exemplar_path, allow_pickle=False).astype(bool)[y0:y1, x0:x1]
-            if not exemplar.any():
-                raise RuntimeError("The Instance Prompt is outside the current SAM3 box")
+            exemplar = exemplar_full[y0:y1, x0:x1]
             progress("Running Instance Prompt grounding…")
             state["backbone_out"].update(processor.model.backbone.forward_text(["visual"], device="cuda"))
             state["geometric_prompt"] = processor.model._get_dummy_prompt()
@@ -44,9 +54,10 @@ def predict_image(processor, torch, rgb, prompt, confidence, box=None, mode="tex
             state = processor._forward_grounding(state)
     cropped_masks = state["masks"].squeeze(1).detach().cpu().numpy().astype(bool)
     masks = np.zeros((len(cropped_masks), full_h, full_w), dtype=bool)
-    masks[:, y0:y1, x0:x1] = cropped_masks
+    masks[:,roi_y0:roi_y1,roi_x0:roi_x1]=cropped_masks[:,roi_y0-y0:roi_y1-y0,roi_x0-x0:roi_x1-x0]
     scores = state["scores"].detach().float().cpu().numpy()
-    return masks, scores
+    keep=masks.any(axis=(1,2))
+    return masks[keep], scores[keep]
 
 
 def serve(processor, torch):
