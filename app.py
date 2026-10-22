@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import sys
+import threading
 from pathlib import Path
 
 import cv2
@@ -21,47 +22,106 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
 from coco_project import CocoProject, mask_geometry
 from batch_sam3 import BatchSam3Mixin
 from resident_sam3 import ResidentSam3Mixin
+from image_data import ImageDataCache
 
 
 COLORS = [(255,75,75),(57,189,248),(75,220,120),(255,196,65),(190,100,255),(255,105,190),(75,230,220)]
 
 
-def apply_display_range(array: np.ndarray, black: int, white: int) -> np.ndarray:
-    """Map an 8-bit image through a display window without changing its source pixels."""
-    low = max(0, min(254, int(black)))
-    high = max(low + 1, min(255, int(white)))
-    values = np.asarray(array, dtype=np.uint8)
-    if low == 0 and high == 255:
-        return values
-    scaled = (values.astype(np.float32) - low) * (255.0 / (high - low))
-    return np.clip(scaled, 0, 255).astype(np.uint8)
+def apply_tone_curve(array: np.ndarray, curve: np.ndarray) -> np.ndarray:
+    return np.asarray(curve, dtype=np.uint8)[np.asarray(array, dtype=np.uint8)]
 
 
 class HistogramCanvas(QWidget):
-    rangeChanged = Signal(int, int)
+    curveChanged = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.histogram = np.zeros(256, dtype=np.int64)
-        self.black = 0
-        self.white = 255
-        self._drag_handle = None
-        self.setMinimumHeight(68)
+        self.has_image = False
+        self.intensity_min = 0.0
+        self.intensity_max = 0.0
+        self.points = [(0, 0), (255, 255)]
+        self._drag_index = None
+        self.setMinimumHeight(96)
         self.setSizePolicy(self.sizePolicy().horizontalPolicy(), self.sizePolicy().verticalPolicy())
-        self.setToolTip("Drag the two handles to adjust the displayed intensity range")
+        self.setToolTip("Click the curve to add a point and drag it to adjust brightness; right-click a point to remove it")
 
-    def set_image(self, array: np.ndarray):
+    def set_image(self, array: np.ndarray | None, histogram=None, intensity_min=None, intensity_max=None):
+        if array is None:
+            self.has_image = False
+            self.histogram = np.zeros(256, dtype=np.int64)
+            self.intensity_min = self.intensity_max = 0.0
+            self.points = [(0, 0), (255, 255)]
+            self._emit_curve()
+            self.update()
+            return
+        if histogram is not None and intensity_min is not None and intensity_max is not None:
+            self.histogram = np.asarray(histogram, dtype=np.int64)
+            self.intensity_min = float(intensity_min)
+            self.intensity_max = float(intensity_max)
+            self.has_image = True
+            self.update()
+            return
         values = np.asarray(array)
-        if values.ndim == 3:
-            gray = cv2.cvtColor(np.asarray(values[..., :3], dtype=np.uint8), cv2.COLOR_RGB2GRAY)
+        if values.ndim == 2:
+            gray = values.astype(np.float64, copy=False)
         else:
-            gray = np.asarray(values, dtype=np.uint8)
-        self.histogram = np.bincount(gray.ravel(), minlength=256)
+            channels = values[..., :3].astype(np.float64, copy=False)
+            gray = channels[..., 0] if channels.shape[2] == 1 else channels[..., 0] * 0.299 + channels[..., 1] * 0.587 + channels[..., 2] * 0.114
+        finite = np.isfinite(gray)
+        if intensity_min is None:
+            self.intensity_min = float(np.min(gray[finite])) if finite.any() else 0.0
+        else:
+            self.intensity_min = float(intensity_min)
+        if intensity_max is None:
+            self.intensity_max = float(np.max(gray[finite])) if finite.any() else 0.0
+        else:
+            self.intensity_max = float(intensity_max)
+        if histogram is None:
+            if finite.any():
+                lo, hi = self.intensity_min, self.intensity_max
+                hist_range = (lo, hi) if hi > lo else (lo - 0.5, hi + 0.5)
+                self.histogram = np.histogram(gray[finite], bins=256, range=hist_range)[0]
+            else:
+                self.histogram = np.zeros(256, dtype=np.int64)
+        else:
+            self.histogram = np.asarray(histogram, dtype=np.int64)
+        self.has_image = True
         self.update()
 
-    def set_range(self, black: int, white: int):
-        self.black, self.white = int(black), int(white)
+    def auto_curve(self):
+        if not self.has_image or not self.histogram.any():
+            return
+        cumulative = np.cumsum(self.histogram)
+        total = int(cumulative[-1])
+        low = int(np.searchsorted(cumulative, max(1, int(total * 0.001))))
+        high = int(np.searchsorted(cumulative, max(1, int(total * 0.999))))
+        if high <= low:
+            self.reset_curve()
+            return
+        points = [(0, 0)]
+        if low > 0:
+            points.append((low, 0))
+        points.append((high, 255))
+        if high < 255:
+            points.append((255, 255))
+        self.points = points
+        self._emit_curve()
         self.update()
+
+    def reset_curve(self):
+        self.points = [(0, 0), (255, 255)]
+        self._emit_curve()
+        self.update()
+
+    def _curve_lut(self):
+        xs = np.asarray([point[0] for point in self.points], dtype=np.float32)
+        ys = np.asarray([point[1] for point in self.points], dtype=np.float32)
+        return np.clip(np.rint(np.interp(np.arange(256), xs, ys)), 0, 255).astype(np.uint8)
+
+    def _emit_curve(self):
+        self.curveChanged.emit(self._curve_lut())
 
     def _plot_bounds(self):
         return 10.0, 7.0, max(1.0, float(self.width() - 20)), max(1.0, float(self.height() - 20))
@@ -82,57 +142,107 @@ class HistogramCanvas(QWidget):
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor("#101824"))
         painter.drawRoundedRect(0, 0, self.width(), self.height(), 6, 6)
-        peak = max(1.0, float(np.log1p(self.histogram.max())))
-        path = QPainterPath(QPointF(left, base))
-        for value, count in enumerate(self.histogram):
-            px = left + value * width / 255.0
-            py = base - float(np.log1p(count)) / peak * (height - 5.0)
-            path.lineTo(px, py)
-        path.lineTo(left + width, base)
-        path.closeSubpath()
-        painter.setBrush(QColor("#3d5970"))
-        painter.drawPath(path)
-        black_x, white_x = self._value_x(self.black), self._value_x(self.white)
-        painter.setBrush(QColor(4, 9, 15, 125))
-        painter.drawRect(left, top, max(0.0, black_x - left), height)
-        painter.drawRect(white_x, top, max(0.0, left + width - white_x), height)
-        painter.setPen(QPen(QColor("#16c79a"), 2))
-        painter.drawLine(QPointF(black_x, top), QPointF(black_x, base))
-        painter.setPen(QPen(QColor("#f4c95d"), 2))
-        painter.drawLine(QPointF(white_x, top), QPointF(white_x, base))
+        if self.has_image:
+            peak = max(1.0, float(np.log1p(self.histogram.max())))
+            path = QPainterPath(QPointF(left, base))
+            for value, count in enumerate(self.histogram):
+                px = left + value * width / 255.0
+                py = base - float(np.log1p(count)) / peak * (height - 5.0)
+                path.lineTo(px, py)
+            path.lineTo(left + width, base)
+            path.closeSubpath()
+            painter.setBrush(QColor("#3d5970"))
+            painter.drawPath(path)
+        painter.setPen(QPen(QColor("#526477"), 1, Qt.DashLine))
+        painter.drawLine(QPointF(left, base), QPointF(left + width, top))
+        curve_path = QPainterPath()
+        for index, (x_value, y_value) in enumerate(self.points):
+            point = QPointF(self._value_x(x_value), base - (y_value / 255.0) * height)
+            if index == 0:
+                curve_path.moveTo(point)
+            else:
+                curve_path.lineTo(point)
+        painter.setPen(QPen(QColor("#16c79a"), 2.5))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPath(curve_path)
+        painter.setPen(QPen(QColor("#07111b"), 1))
+        for x_value, y_value in self.points:
+            point = QPointF(self._value_x(x_value), base - (y_value / 255.0) * height)
+            painter.setBrush(QColor("#f4c95d"))
+            painter.drawEllipse(point, 4.5, 4.5)
         painter.setPen(QColor("#8392a8"))
-        painter.drawText(10, self.height() - 2, "0")
-        painter.drawText(self.width() - 30, self.height() - 2, "255")
+        if self.has_image:
+            painter.drawText(10, self.height() - 2, self._format_intensity(self.intensity_min))
+            painter.drawText(self.width() - 58, self.height() - 2, self._format_intensity(self.intensity_max))
+
+    @staticmethod
+    def _format_intensity(value):
+        return f"{value:.4g}"
 
     def mousePressEvent(self, event):
+        if event.button() == Qt.RightButton:
+            index = self._nearest_point(event.position().x(), event.position().y())
+            if index not in (None, 0, len(self.points) - 1):
+                self.points.pop(index)
+                self._emit_curve(); self.update()
+            event.accept()
+            return
         if event.button() != Qt.LeftButton:
             return super().mousePressEvent(event)
-        x = event.position().x()
-        self._drag_handle = "black" if abs(x - self._value_x(self.black)) <= abs(x - self._value_x(self.white)) else "white"
-        self._move_handle(x)
+        index = self._nearest_point(event.position().x(), event.position().y())
+        if index is None:
+            value = self._value_at_x(event.position().x())
+            value = max(self.points[0][0] + 1, min(self.points[-1][0] - 1, value))
+            y_value = int(round(self._curve_lut()[value]))
+            self.points = [point for point in self.points if point[0] != value]
+            self.points.append((value, y_value)); self.points.sort(key=lambda point: point[0])
+            index = self.points.index((value, y_value))
+        self._drag_index = index
+        self._move_point(event.position().x(), event.position().y())
         event.accept()
 
     def mouseMoveEvent(self, event):
-        if self._drag_handle:
-            self._move_handle(event.position().x())
+        if self._drag_index is not None:
+            self._move_point(event.position().x(), event.position().y())
             event.accept()
             return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        self._drag_handle = None
+        self._drag_index = None
         super().mouseReleaseEvent(event)
 
-    def _move_handle(self, x):
+    def _nearest_point(self, x, y):
+        _, top, _, height = self._plot_bounds()
+        base = top + height
+        distances = [((x - self._value_x(px)) ** 2 + (y - (base - py * height / 255.0)) ** 2, index)
+                     for index, (px, py) in enumerate(self.points)]
+        distance, index = min(distances)
+        return index if distance <= 15.0 ** 2 else None
+
+    def _move_point(self, x, y):
+        index = self._drag_index
+        if index is None:
+            return
+        left, top, width, height = self._plot_bounds()
         value = self._value_at_x(x)
-        if self._drag_handle == "black":
-            self.rangeChanged.emit(min(value, self.white - 1), self.white)
+        output = int(round(max(0, min(255, (top + height - y) * 255.0 / height))))
+        if index == 0:
+            value = 0
+        elif index == len(self.points) - 1:
+            value = 255
         else:
-            self.rangeChanged.emit(self.black, max(value, self.black + 1))
+            value = max(self.points[index - 1][0] + 1, min(self.points[index + 1][0] - 1, value))
+        self.points[index] = (value, output)
+        if index in (0, len(self.points) - 1):
+            self.points[index] = (self.points[index][0], output)
+        self._emit_curve(); self.update()
 
 
 class HistogramPanel(QWidget):
-    rangeChanged = Signal(int, int)
+    curveChanged = Signal(object)
+    previousRequested = Signal()
+    nextRequested = Signal()
 
     def __init__(self, english=False, parent=None):
         super().__init__(parent)
@@ -144,42 +254,28 @@ class HistogramPanel(QWidget):
         layout.addWidget(self.canvas, 1)
         controls = QHBoxLayout()
         controls.setContentsMargins(4, 0, 4, 0)
-        self.black_spin = QSpinBox(); self.black_spin.setRange(0, 254)
-        self.white_spin = QSpinBox(); self.white_spin.setRange(1, 255); self.white_spin.setValue(255)
+        self.auto_button = QPushButton("Auto")
         self.reset_button = QPushButton("Reset" if english else "重置")
-        controls.addWidget(QLabel("Histogram" if english else "直方图"))
-        controls.addSpacing(8)
-        controls.addWidget(QLabel("Black" if english else "黑场")); controls.addWidget(self.black_spin)
-        controls.addSpacing(8)
-        controls.addWidget(QLabel("White" if english else "白场")); controls.addWidget(self.white_spin)
-        controls.addStretch(1); controls.addWidget(self.reset_button)
+        self.previous_button = QPushButton("◀" if english else "上一张")
+        self.next_button = QPushButton("▶" if english else "下一张")
+        controls.addWidget(QLabel("Histogram"))
+        controls.addStretch(1)
+        controls.addWidget(self.auto_button); controls.addWidget(self.reset_button)
+        controls.addWidget(self.previous_button); controls.addWidget(self.next_button)
         layout.addLayout(controls)
-        self.canvas.rangeChanged.connect(self.set_range)
-        self.black_spin.valueChanged.connect(self._spins_changed)
-        self.white_spin.valueChanged.connect(self._spins_changed)
-        self.reset_button.clicked.connect(self.reset_range)
-        self.setFixedHeight(116)
+        self.canvas.curveChanged.connect(self.curveChanged)
+        self.auto_button.clicked.connect(self.canvas.auto_curve)
+        self.reset_button.clicked.connect(self.reset_curve)
+        self.previous_button.clicked.connect(self.previousRequested)
+        self.next_button.clicked.connect(self.nextRequested)
+        self.setFixedHeight(144)
 
-    def set_image(self, array: np.ndarray):
-        self.canvas.set_image(array)
-        self.reset_range()
+    def set_image(self, array: np.ndarray | None, histogram=None, intensity_min=None, intensity_max=None):
+        self.canvas.set_image(array, histogram, intensity_min, intensity_max)
+        self.reset_curve()
 
-    def set_range(self, black: int, white: int):
-        black = max(0, min(int(black), 254))
-        white = max(black + 1, min(int(white), 255))
-        self.black_spin.blockSignals(True); self.white_spin.blockSignals(True)
-        self.black_spin.setValue(black); self.white_spin.setValue(white)
-        self.black_spin.blockSignals(False); self.white_spin.blockSignals(False)
-        self.canvas.set_range(black, white)
-        self.rangeChanged.emit(black, white)
-
-    def _spins_changed(self, _value):
-        black = self.black_spin.value()
-        white = max(black + 1, self.white_spin.value())
-        self.set_range(black, white)
-
-    def reset_range(self):
-        self.set_range(0, 255)
+    def reset_curve(self):
+        self.canvas.reset_curve()
 
 THEME_QSS = """
 QWidget {
@@ -282,7 +378,7 @@ class AnnotationView(QGraphicsView):
         self.mode = "idle"; self.brush_size = 20; self.polygon = []; self.preview = None; self.drawing = False
         self._middle_panning=False; self._middle_pan_pos=None
         self.sam_box = None; self.box_start = None
-        self.display_black = 0; self.display_white = 255
+        self.display_curve = np.arange(256, dtype=np.uint8)
         self.exemplar_mask = None
         self._overlay_cache=None; self._overlay_signature=None; self._editing_background=None; self.overlay_item=None; self.active_overlay_item=None
         self._background_key=None; self._hit_map=None; self._hit_signature=None; self._bbox_cache={}
@@ -293,7 +389,7 @@ class AnnotationView(QGraphicsView):
 
     def set_image(self, array: np.ndarray, masks: list[dict]):
         self.scene().clear(); self.array = array; self.masks = masks; self.selected = -1; self.polygon = []; self.overlay_item=None; self.active_overlay_item=None
-        self.display_black = 0; self.display_white = 255
+        self.display_curve = np.arange(256, dtype=np.uint8)
         self._overlay_cache=None; self._overlay_signature=None; self._editing_background=None; self._background_key=None
         self._hit_map=None; self._hit_signature=None; self._bbox_cache={}
         h,w=array.shape[:2]
@@ -309,14 +405,16 @@ class AnnotationView(QGraphicsView):
     def _update_image_display(self):
         if self.array is None or self.image_item is None:
             return
-        rgb = np.ascontiguousarray(apply_display_range(self.array[..., :3], self.display_black, self.display_white))
+        rgb = np.ascontiguousarray(apply_tone_curve(self.array[..., :3], self.display_curve))
         h, w = rgb.shape[:2]
         qimg = QImage(rgb.data, w, h, rgb.strides[0], QImage.Format_RGB888).copy()
         self.image_item.setPixmap(QPixmap.fromImage(qimg))
 
-    def set_display_range(self, black: int, white: int):
-        self.display_black = max(0, min(254, int(black)))
-        self.display_white = max(self.display_black + 1, min(255, int(white)))
+    def set_display_curve(self, curve: np.ndarray):
+        curve = np.asarray(curve, dtype=np.uint8)
+        if curve.shape != (256,):
+            return
+        self.display_curve = curve.copy()
         self._update_image_display()
 
     def redraw(self):
@@ -601,17 +699,84 @@ class AnnotationView(QGraphicsView):
         else: super().keyPressEvent(event)
 
 
-class ProjectOpenWorker(QObject):
+class ProjectImportWorker(QObject):
+    progress = Signal(int, int, str)
     completed = Signal(object)
+    cancelled = Signal()
     failed = Signal(str)
 
-    def __init__(self, json_path):
-        super().__init__(); self.json_path=Path(json_path)
+    def __init__(self, folder=None, paths=None, root=None):
+        super().__init__()
+        self.folder = Path(folder) if folder is not None else None
+        self.paths = [Path(path) for path in paths] if paths is not None else None
+        self.root = Path(root) if root is not None else None
+        self.cancel_event = threading.Event()
+
+    def request_cancel(self):
+        self.cancel_event.set()
 
     @Slot()
     def run(self):
         try:
-            project=CocoProject(); project.open_json(self.json_path); self.completed.emit(project)
+            project = CocoProject()
+            progress = lambda done, total, message: self.progress.emit(done, total, message)
+            cancelled = self.cancel_event.is_set
+            if self.folder is not None:
+                project.new_from_folder(self.folder, progress, cancelled)
+            else:
+                project.new_from_files(self.paths or [], self.root, progress, cancelled)
+            if self.cancel_event.is_set():
+                self.cancelled.emit()
+            else:
+                self.completed.emit(project)
+        except InterruptedError:
+            self.cancelled.emit()
+        except Exception as exc:
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
+class ProjectAddImagesWorker(QObject):
+    progress = Signal(int, int, str)
+    completed = Signal(object, object)
+    failed = Signal(str)
+
+    def __init__(self, project, paths):
+        super().__init__()
+        self.project = project
+        self.paths = [Path(path) for path in paths]
+
+    @Slot()
+    def run(self):
+        try:
+            added = self.project.add_images(self.paths, copy_into_project=True,
+                progress_callback=lambda done, total, message: self.progress.emit(done, total, message))
+            self.completed.emit(self.project, added)
+        except Exception as exc:
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
+class ProjectOpenWorker(QObject):
+    progress = Signal(int, int, str)
+    completed = Signal(object)
+    cancelled = Signal()
+    failed = Signal(str)
+
+    def __init__(self, json_path):
+        super().__init__(); self.json_path=Path(json_path); self.cancel_event=threading.Event()
+
+    def request_cancel(self):
+        self.cancel_event.set()
+
+    @Slot()
+    def run(self):
+        try:
+            project=CocoProject(); project.open_json(self.json_path,
+                lambda done,total,message:self.progress.emit(done,total,message),
+                self.cancel_event.is_set)
+            if self.cancel_event.is_set():self.cancelled.emit()
+            else:self.completed.emit(project)
+        except InterruptedError:
+            self.cancelled.emit()
         except Exception as exc:self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
@@ -635,6 +800,7 @@ class ExportWorker(QObject):
         marker=self.output/"EXPORT_INCOMPLETE.txt"
         try:
             count=len(self.image_paths); total=max(2,2*count+2); done=0
+            preview_cache=ImageDataCache(max_bytes=64*1024*1024)
             training=self.output/"training_dataset"; training_images=training/"images"; auxiliary=self.output/"auxiliary_outputs"
             labels=auxiliary/"instance_labels"; previews=auxiliary/"previews"
             training_images.mkdir(parents=True,exist_ok=True); labels.mkdir(parents=True,exist_ok=True); previews.mkdir(parents=True,exist_ok=True)
@@ -651,7 +817,7 @@ class ExportWorker(QObject):
             project=CocoProject(); project.data=copy.deepcopy(self.data)
             rows=[]
             for index,(rec,path) in enumerate(zip(self.data["images"],self.image_paths),1):
-                self._check_cancel(); rgb=np.asarray(Image.open(path).convert("RGB")); masks=project.masks_for(rec["id"],rgb.shape[1],rgb.shape[0]); label=np.zeros(rgb.shape[:2],np.uint16); overlay=rgb.copy()
+                self._check_cancel(); rgb=preview_cache.get(path).display_rgb8; masks=project.masks_for(rec["id"],rgb.shape[1],rgb.shape[0]); label=np.zeros(rgb.shape[:2],np.uint16); overlay=rgb.copy()
                 for number,mask in enumerate(masks,1):label[mask["mask"]]=number; color=np.array(COLORS[(number-1)%len(COLORS)]); overlay[mask["mask"]]=(0.55*overlay[mask["mask"]]+0.45*color).astype(np.uint8)
                 Image.fromarray(label).save(labels/f"{path.stem}_instances.png"); Image.fromarray(overlay).save(previews/f"{path.stem}_preview.png"); rows.append([path.name,len(masks),rec["id"] in self.reviewed])
                 done+=1; self.progress.emit(done,total,f"Rendering labels and preview {index}/{count}: {path.name}")
@@ -669,14 +835,17 @@ class ExportWorker(QObject):
 
 class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
     def __init__(self):
-        super().__init__(); self.ui_language=getattr(self,"ui_language","zh"); self.setWindowTitle("Particle Label GUI — 2026-10-21"); self.resize(1550,930); self.setStyleSheet(THEME_QSS)
+        super().__init__(); self.ui_language=getattr(self,"ui_language","zh"); self.setWindowTitle("Particle Label GUI — 2026-10-22"); self.resize(1550,930); self.setStyleSheet(THEME_QSS)
         icon_path=Path(__file__).with_name("BL62_Label.ico")
         if icon_path.is_file():self.setWindowIcon(QIcon(str(icon_path)))
         self.setAcceptDrops(True)
-        self.project=CocoProject(); self.index=-1; self.masks=[]; self.current_masks_dirty=False; self.undo_stack=[]; self.redo_stack=[]; self.sam_busy=False; self.sam_loaded_flag=False
+        self.project=CocoProject(); self.image_cache=ImageDataCache(); self.source_image=None; self.sam_rgb8=None; self.index=-1; self.masks=[]; self.current_masks_dirty=False; self.undo_stack=[]; self.redo_stack=[]; self.sam_busy=False; self.sam_loaded_flag=False
         self._sam_replace_requested=False; self._sam_replace_box=None
         self.export_thread=None; self.export_worker=None; self.export_dialog=None
         self.open_thread=None; self.open_worker=None; self.open_dialog=None
+        self.import_thread=None; self.import_worker=None; self.import_dialog=None; self._import_cancel_requested=False
+        self._open_cancel_requested=False
+        self.add_thread=None; self.add_worker=None; self.add_dialog=None
         self.prompt_mode="text"; self.mask_prompt=None; self.mask_prompt_source=None; self.capture_mask_prompt=False
         self.settings_path=Path(__file__).with_name("sam3_settings.json")
         self._build(); self.statusBar().showMessage("新建文件夹/图片项目，或打开 COCO annotations.json；可拖拽图片加入当前项目")
@@ -689,7 +858,7 @@ class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
         toolbar.addSeparator(); self.show_labels_action=QAction("隐藏标签",self); self.show_labels_action.setShortcut("L"); self.show_labels_action.setCheckable(True); self.show_labels_action.setChecked(True); self.show_labels_action.triggered.connect(self.toggle_label_visibility); toolbar.addAction(self.show_labels_action)
         toolbar.addSeparator(); toolbar.addWidget(QLabel("笔刷 ")); size=QSpinBox(); size.setRange(1,300); size.setValue(20); size.valueChanged.connect(lambda value:self.view.set_brush_size(value)); toolbar.addWidget(size)
         root=QWidget(); self.setCentralWidget(root); layout=QVBoxLayout(root); top=QHBoxLayout(); layout.addLayout(top)
-        for text,slot in [("新建项目",self.new_project),("导入已有项目",self.open_project),("保存 Ctrl+S",self.save),("上一张",lambda:self.navigate(-1)),("下一张",lambda:self.navigate(1)),("标为已审核",self.toggle_review),("导出",self.export_all)]:
+        for text,slot in [("新建项目",self.new_project),("导入已有项目",self.open_project),("保存 Ctrl+S",self.save),("标为已审核",self.toggle_review),("导出",self.export_all)]:
             b=QPushButton(text); b.clicked.connect(slot); top.addWidget(b)
             if text=="导出":self.export_btn=b
         top.addStretch(); self.counter=QLabel("未打开项目"); top.addWidget(self.counter)
@@ -698,7 +867,7 @@ class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
         self.images.itemSelectionChanged.connect(self.update_run_button)
         center=QWidget(); center_layout=QVBoxLayout(center); center_layout.setContentsMargins(0,0,0,0); center_layout.setSpacing(3)
         self.view=AnnotationView(); self.view.changed.connect(self.push_undo); self.view.changed.connect(self.mark_current_dirty); self.view.selection_requested.connect(self.select_mask); self.view.masks_changed.connect(self.refresh_masks); self.view.masks_changed.connect(self.mark_current_dirty); self.view.instance_finished.connect(self.on_instance_finished); self.view.small_mask_finished.connect(self.confirm_small_mask); self.view.tool_reset_requested.connect(self.reset_tool); self.view.box_changed.connect(self.update_roi_status); self.view.box_changed.connect(self.on_sam_box_finished); self.view.status.connect(self.statusBar().showMessage); center_layout.addWidget(self.view,1)
-        self.histogram=HistogramPanel(english=getattr(self,"ui_language","zh")=="en"); self.histogram.rangeChanged.connect(self.view.set_display_range); center_layout.addWidget(self.histogram); split.addWidget(center)
+        self.histogram=HistogramPanel(english=getattr(self,"ui_language","zh")=="en"); self.histogram.curveChanged.connect(self.view.set_display_curve); self.histogram.previousRequested.connect(lambda:self.navigate(-1)); self.histogram.nextRequested.connect(lambda:self.navigate(1)); center_layout.addWidget(self.histogram); split.addWidget(center)
         right=QWidget(); rl=QVBoxLayout(right)
         rl.addWidget(QLabel("SAM3 GPU 辅助标注")); self.repo_label=QLabel(); self.repo_label.setWordWrap(True); rl.addWidget(self.repo_label)
         choose_repo=QPushButton("选择 SAM3 仓库"); choose_repo.clicked.connect(self.choose_sam_repo); rl.addWidget(choose_repo)
@@ -997,6 +1166,81 @@ class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
             if 0<=self.view.selected<len(self.masks):self.masks[self.view.selected]["_geometry_dirty"]=True
     def new_project(self):
         self._choose_new_project(False)
+    def _make_import_dialog(self,title,cancellable=True):
+        dialog=QProgressDialog(title,"取消" if getattr(self,"ui_language","zh")!="en" else "Cancel",0,0,self)
+        dialog.setWindowTitle("导入图片" if getattr(self,"ui_language","zh")!="en" else "Import Images")
+        if not cancellable:dialog.setCancelButton(None)
+        dialog.setWindowModality(Qt.WindowModal); dialog.setMinimumDuration(0); dialog.setAutoClose(False); dialog.setAutoReset(False); dialog.show()
+        return dialog
+    def _update_import_progress(self,dialog,done,total,message):
+        if dialog is None or self._import_cancel_requested or self._open_cancel_requested:return
+        if total>0 and dialog.maximum()!=total:dialog.setRange(0,total)
+        dialog.setLabelText(message)
+        if total>0:dialog.setValue(min(done,total))
+    def _project_import_progress(self,done,total,message):
+        self._update_import_progress(self.import_dialog,done,total,message)
+    def _images_add_progress(self,done,total,message):
+        self._update_import_progress(self.add_dialog,done,total,message)
+    def _project_open_progress(self,done,total,message):
+        self._update_import_progress(self.open_dialog,done,total,message)
+    def _start_project_import(self,folder=None,paths=None,root=None):
+        if self.import_thread and self.import_thread.isRunning():return
+        english=getattr(self,"ui_language","zh")=="en"
+        title="Preparing image import…" if english else "正在准备导入图片……"
+        self._import_cancel_requested=False
+        self.import_dialog=self._make_import_dialog(title)
+        self.import_thread=QThread(self); self.import_worker=ProjectImportWorker(folder,paths,root); self.import_worker.moveToThread(self.import_thread)
+        self.import_thread.started.connect(self.import_worker.run)
+        self.import_worker.progress.connect(self._project_import_progress)
+        self.import_worker.completed.connect(self._project_imported); self.import_worker.cancelled.connect(self._project_import_cancelled); self.import_worker.failed.connect(self._project_import_failed)
+        self.import_worker.completed.connect(self.import_thread.quit); self.import_worker.cancelled.connect(self.import_thread.quit); self.import_worker.failed.connect(self.import_thread.quit)
+        self.import_worker.completed.connect(self.import_worker.deleteLater); self.import_worker.cancelled.connect(self.import_worker.deleteLater); self.import_worker.failed.connect(self.import_worker.deleteLater)
+        self.import_thread.finished.connect(self._project_import_cleanup)
+        self.import_dialog.canceled.connect(self._request_import_cancel)
+        self.import_thread.start()
+    def _request_import_cancel(self):
+        self._import_cancel_requested=True
+        if self.import_worker:self.import_worker.request_cancel()
+        if self.import_dialog:self.import_dialog.hide()
+    def _project_imported(self,project):
+        if self.import_dialog:self.import_dialog.close()
+        self.image_cache.clear(); self.source_image=None; self.sam_rgb8=None
+        self.project=project; self.index=-1; self.masks=[]; self.undo_stack=[]; self.redo_stack=[]; self.populate(); self.save(show_confirmation=False)
+        count=len(project.image_paths); english=getattr(self,"ui_language","zh")=="en"
+        self.statusBar().showMessage((f"Imported {count} image(s)." if english else f"已导入 {count} 张图片。"),7000)
+    def _project_import_cancelled(self):
+        if self.import_dialog:self.import_dialog.close()
+        self.statusBar().showMessage("Image import cancelled; the current project was kept." if getattr(self,"ui_language","zh")=="en" else "已取消导入，当前项目未更改。",6000)
+    def _project_import_failed(self,message):
+        if self.import_dialog:self.import_dialog.close()
+        self.error(message)
+    def _project_import_cleanup(self):
+        if self.import_thread:self.import_thread.deleteLater()
+        self.import_worker=None; self.import_thread=None; self.import_dialog=None; self._import_cancel_requested=False
+    def _start_add_images(self,paths):
+        if self.add_thread and self.add_thread.isRunning():return
+        self.guard_save(); self.project.save()
+        english=getattr(self,"ui_language","zh")=="en"
+        self.add_dialog=self._make_import_dialog("Adding images…" if english else "正在添加图片……",cancellable=False)
+        self.add_thread=QThread(self); self.add_worker=ProjectAddImagesWorker(copy.deepcopy(self.project),paths); self.add_worker.moveToThread(self.add_thread)
+        self.add_thread.started.connect(self.add_worker.run)
+        self.add_worker.progress.connect(self._images_add_progress)
+        self.add_worker.completed.connect(self._images_added); self.add_worker.failed.connect(self._images_add_failed)
+        self.add_worker.completed.connect(self.add_thread.quit); self.add_worker.failed.connect(self.add_thread.quit)
+        self.add_worker.completed.connect(self.add_worker.deleteLater); self.add_worker.failed.connect(self.add_worker.deleteLater)
+        self.add_thread.finished.connect(self._add_images_cleanup); self.add_thread.start()
+    def _images_added(self,project,added):
+        if self.add_dialog:self.add_dialog.close()
+        if not added:
+            self.statusBar().showMessage("No new supported images were added." if getattr(self,"ui_language","zh")=="en" else "没有添加新的受支持图片。",5000);return
+        self.project=project; self.index=-1; self.masks=[]; self.populate(); self.images.setCurrentRow(added[0]); self.save(show_confirmation=False)
+        count=len(added); self.statusBar().showMessage((f"Added {count} image(s)." if getattr(self,"ui_language","zh")=="en" else f"已添加 {count} 张图片。"),5000)
+    def _images_add_failed(self,message):
+        if self.add_dialog:self.add_dialog.close()
+        self.error(message)
+    def _add_images_cleanup(self):
+        if self.add_thread:self.add_thread.deleteLater()
+        self.add_worker=None; self.add_thread=None; self.add_dialog=None
     def _choose_new_project(self,english=False):
         box=QMessageBox(self); box.setWindowTitle("New Project" if english else "新建项目")
         box.setText("Choose how to add source images." if english else "请选择导入原始图片的方式。")
@@ -1007,13 +1251,12 @@ class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
             if box.clickedButton() is folder_button:
                 folder=QFileDialog.getExistingDirectory(self,"New Project: select an image folder" if english else "新建项目：选择包含原始图片的文件夹")
                 if not folder:return
-                self.project.new_from_folder(Path(folder))
+                self._start_project_import(folder=Path(folder));return
             elif box.clickedButton() is files_button:
                 names,_=QFileDialog.getOpenFileNames(self,"New Project: select one or more images" if english else "新建项目：选择一张或多张图片","","Images (*.png *.jpg *.jpeg *.tif *.tiff *.bmp *.webp)")
                 if not names:return
-                self.project.new_from_files([Path(name) for name in names])
+                self._start_project_import(paths=[Path(name) for name in names]);return
             else:return
-            self.index=-1; self.masks=[]; self.populate(); self.save()
         except Exception as e:self.error(e)
     def dragEnterEvent(self,event):
         urls=event.mimeData().urls() if event.mimeData().hasUrls() else []
@@ -1024,15 +1267,9 @@ class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
         paths=[Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()]
         try:
             if self.project.root is None:
-                self.project.new_from_files(paths)
-                self.index=-1; self.masks=[]; self.populate(); self.project.save()
-                self.statusBar().showMessage((f"Created a new project from {len(self.project.image_paths)} dropped image(s)." if english else f"已使用拖入的 {len(self.project.image_paths)} 张图片创建新项目。"),7000)
+                self._start_project_import(paths=paths)
                 event.acceptProposedAction();return
-            self.guard_save(); added=self.project.add_images(paths,copy_into_project=True)
-            if not added:
-                self.statusBar().showMessage("No new supported images were added." if english else "没有添加新的受支持图片。",5000);event.acceptProposedAction();return
-            self.project.save(); first=added[0]; self.index=-1; self.masks=[]; self.populate(); self.images.setCurrentRow(first)
-            self.statusBar().showMessage((f"Added {len(added)} image(s) to the current project." if english else f"已向当前项目添加 {len(added)} 张图片。"),5000)
+            self._start_add_images(paths)
             event.acceptProposedAction()
         except Exception as e:self.error(e);event.ignore()
     def open_project(self):
@@ -1042,23 +1279,36 @@ class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
     def _open_project_in_background(self,path):
         if self.open_thread and self.open_thread.isRunning():return
         english=getattr(self,"ui_language","zh")=="en"
-        self.open_dialog=QProgressDialog("Reading and indexing the COCO project…" if english else "正在读取并索引 COCO 项目……","",0,0,self)
-        self.open_dialog.setWindowTitle("Import Existing Project" if english else "导入已有项目"); self.open_dialog.setCancelButton(None); self.open_dialog.setWindowModality(Qt.WindowModal); self.open_dialog.setMinimumDuration(0); self.open_dialog.show()
+        self._open_cancel_requested=False
+        self.open_dialog=QProgressDialog("Reading and indexing the COCO project…" if english else "正在读取并索引 COCO 项目……","Cancel" if english else "取消",0,0,self)
+        self.open_dialog.setWindowTitle("Import Existing Project" if english else "导入已有项目"); self.open_dialog.setWindowModality(Qt.WindowModal); self.open_dialog.setMinimumDuration(0); self.open_dialog.show()
         self.open_thread=QThread(self); self.open_worker=ProjectOpenWorker(path); self.open_worker.moveToThread(self.open_thread)
         self.open_thread.started.connect(self.open_worker.run); self.open_worker.completed.connect(self._project_opened); self.open_worker.failed.connect(self._project_open_failed)
-        self.open_worker.completed.connect(self.open_worker.deleteLater); self.open_worker.failed.connect(self.open_worker.deleteLater)
-        self.open_worker.completed.connect(self.open_thread.quit); self.open_worker.failed.connect(self.open_thread.quit); self.open_thread.finished.connect(self._project_open_cleanup); self.open_thread.start()
+        self.open_worker.progress.connect(self._project_open_progress)
+        self.open_worker.cancelled.connect(self._project_open_cancelled)
+        self.open_worker.completed.connect(self.open_worker.deleteLater); self.open_worker.failed.connect(self.open_worker.deleteLater); self.open_worker.cancelled.connect(self.open_worker.deleteLater)
+        self.open_worker.completed.connect(self.open_thread.quit); self.open_worker.failed.connect(self.open_thread.quit); self.open_worker.cancelled.connect(self.open_thread.quit)
+        self.open_dialog.canceled.connect(self._request_open_cancel)
+        self.open_thread.finished.connect(self._project_open_cleanup); self.open_thread.start()
+    def _request_open_cancel(self):
+        self._open_cancel_requested=True
+        if self.open_worker:self.open_worker.request_cancel()
+        if self.open_dialog:self.open_dialog.hide()
     def _project_opened(self,project):
         if self.open_dialog:self.open_dialog.close()
+        self.image_cache.clear(); self.source_image=None; self.sam_rgb8=None
         self.project=project; self.index=-1; self.masks=[]; self.undo_stack=[]; self.redo_stack=[]; self.populate()
         count=len(project.image_paths); annotations=len(project.data.get("annotations",[])); english=getattr(self,"ui_language","zh")=="en"
         self.statusBar().showMessage((f"Project imported: {count} images, {annotations} annotations" if english else f"项目导入完成：{count} 张图片，{annotations} 个标注"),7000)
     def _project_open_failed(self,message):
         if self.open_dialog:self.open_dialog.close()
         self.error(message)
+    def _project_open_cancelled(self):
+        if self.open_dialog:self.open_dialog.close()
+        self.statusBar().showMessage("Project import cancelled; the current project was kept." if getattr(self,"ui_language","zh")=="en" else "已取消项目导入，当前项目未更改。",6000)
     def _project_open_cleanup(self):
         if self.open_thread:self.open_thread.deleteLater()
-        self.open_worker=None; self.open_thread=None; self.open_dialog=None
+        self.open_worker=None; self.open_thread=None; self.open_dialog=None; self._open_cancel_requested=False
     def remove_from_project(self):
         english=getattr(self,"ui_language","zh")=="en"
         rows=sorted({item.row() for item in self.images.selectedIndexes()})
@@ -1099,6 +1349,8 @@ class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
             prefix=("✓ " if rec["id"] in self.project.reviewed else "  ")+("● " if rec["id"] in ann_ids else "○ ")
             self.images.addItem(prefix+path.name)
         self.images.blockSignals(False); self.refresh_categories(); self.images.setCurrentRow(0)
+        if not self.project.image_paths:
+            self.histogram.set_image(None)
     def commit_current(self,force=False):
         if self.index<0 or (not force and not self.current_masks_dirty):return
         rec=self.project.image_record(self.index); self.project.replace_masks(rec["id"],self.masks); self.current_masks_dirty=False
@@ -1107,10 +1359,10 @@ class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
         if self.index>=0:self.commit_current()
         self.index=index; path=self.project.image_paths[index]
         try:
-            rgb=np.asarray(Image.open(path).convert("RGB")); rec=self.project.image_record(index)
+            image_data=self.image_cache.get(path); self.source_image=None; self.sam_rgb8=image_data.sam_rgb8; rgb=image_data.display_rgb8; rec=self.project.image_record(index)
             self.masks=self.project.masks_for(rec["id"],rgb.shape[1],rgb.shape[0]); self.undo_stack=[]; self.redo_stack=[]
             self.mask_prompt=None; self.mask_prompt_source=None; self.capture_mask_prompt=False; self.view.exemplar_mask=None; self.view.sam_box=None
-            self.view.set_image(rgb,self.masks); self.histogram.set_image(rgb); self.current_masks_dirty=False; self.mask_prompt_status.setText("Mask Prompt：尚未设置"); self.update_roi_status(); self.update_run_button(); self.refresh_masks(); self.counter.setText(f"{index+1}/{len(self.project.image_paths)}  {path.name}")
+            self.view.set_image(rgb,self.masks); self.histogram.set_image(rgb,image_data.histogram,image_data.intensity_min,image_data.intensity_max); self.current_masks_dirty=False; self.mask_prompt_status.setText("Mask Prompt：尚未设置"); self.update_roi_status(); self.update_run_button(); self.refresh_masks(); self.counter.setText(f"{index+1}/{len(self.project.image_paths)}  {path.name}")
         except Exception as e:self.error(e)
     def navigate(self,delta):
         if self.images.count():self.images.setCurrentRow(max(0,min(self.images.count()-1,self.index+delta)))
@@ -1190,11 +1442,11 @@ class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
         has_annotations=any(ann.get("image_id")==rec["id"] for ann in self.project.data["annotations"])
         prefix=("✓ " if rec["id"] in self.project.reviewed else "  ")+("● " if has_annotations else "○ ")
         self.images.item(row).setText(prefix+path.name)
-    def save(self):
+    def save(self,show_confirmation=True):
         if self.project.json_path is None:return
         try:
             self.commit_current(force=True); self.project.save(); self.update_image_status(self.index); self.statusBar().showMessage(f"已保存：{self.project.json_path}",5000)
-            QMessageBox.information(self,"保存完成",f"已保存到：\n{self.project.json_path}")
+            if show_confirmation:QMessageBox.information(self,"保存完成",f"已保存到：\n{self.project.json_path}")
         except Exception as e:self.error(e)
     def export_all(self):
         if self.project.root is None:return

@@ -205,8 +205,10 @@ class ResidentSam3Mixin:
         try:
             self._single_temp = tempfile.TemporaryDirectory(prefix='bl62_sam3_single_')
             folder = Path(self._single_temp.name)
-            np.save(folder/'image.npy', self.view.array, allow_pickle=False)
-            request = {'image': str(folder/'image.npy'), 'output': str(folder/'result.npz'),
+            image_path = self.project.image_paths[self._single_index]
+            image_data = self.image_cache.get(image_path)
+            sam_image = str(image_data.sam_path)
+            request = {'image': sam_image, 'output': str(folder/'result.npz'),
                 'prompt': prompt, 'confidence': self.confidence.value()/100,
                 'box': self.view.sam_box, 'mode': 'instance' if self.prompt_mode == 'mask' else 'text'}
             if self.prompt_mode == 'mask':

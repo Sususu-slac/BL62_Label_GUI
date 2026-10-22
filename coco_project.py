@@ -10,6 +10,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from image_data import prepare_image
 
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
@@ -113,14 +114,14 @@ class CocoProject:
             index.setdefault(int(annotation.get("image_id", -1)), []).append(annotation)
         self._annotations_by_image = index
 
-    def new_from_folder(self, folder: Path) -> None:
+    def new_from_folder(self, folder: Path, progress_callback=None, cancelled=None) -> None:
         folder = folder.resolve()
         paths = sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS)
         if not paths:
             raise ValueError("No supported images found in this folder")
-        self.new_from_files(paths, folder)
+        self.new_from_files(paths, folder, progress_callback, cancelled)
 
-    def new_from_files(self, paths: list[Path], root: Path | None = None) -> None:
+    def new_from_files(self, paths: list[Path], root: Path | None = None, progress_callback=None, cancelled=None) -> None:
         paths = [Path(path).resolve() for path in paths]
         paths = sorted(dict.fromkeys(path for path in paths if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS))
         if not paths:
@@ -132,31 +133,62 @@ class CocoProject:
             root = next(iter(parents))
         root = Path(root).resolve()
         from PIL import Image
-        self.root, self.json_path, self.image_paths = root, root / "annotations.json", paths
         images = []
+        total = len(paths) * 2
+        if progress_callback:
+            progress_callback(0, total, f"Reading image headers (0/{len(paths)})…")
         for idx, path in enumerate(paths, 1):
+            if cancelled and cancelled():
+                raise InterruptedError("Import cancelled")
             with Image.open(path) as im:
                 width, height = im.size
             images.append({"id": idx, "file_name": path.name, "width": width, "height": height})
+            if progress_callback:
+                progress_callback(idx, total, f"Reading image size {idx}/{len(paths)}: {path.name}")
+        for idx, path in enumerate(paths, 1):
+            if cancelled and cancelled():
+                raise InterruptedError("Import cancelled")
+            prepare_image(path, cancelled=cancelled)
+            if progress_callback:
+                progress_callback(len(paths) + idx, total, f"Preparing SAM3 image {idx}/{len(paths)}: {path.name}")
+        self.root, self.json_path, self.image_paths = root, root / "annotations.json", paths
         self.data = {"info": {"description": "Particle Label GUI project", "created": datetime.now().isoformat(timespec="seconds")}, "images": images, "annotations": [], "categories": [{"id": 1, "name": "particle", "supercategory": "particle"}]}
         self._rebuild_annotation_index()
         self.reviewed, self.dirty, self._backup_done = set(), True, False
 
-    def add_images(self, paths: list[Path], copy_into_project: bool = True) -> list[int]:
+    def add_images(self, paths: list[Path], copy_into_project: bool = True, progress_callback=None, cancelled=None) -> list[int]:
         if self.root is None:
             raise RuntimeError("Open or create a project before adding images")
         from PIL import Image
 
-        sources = [Path(path).resolve() for path in paths]
-        sources = list(dict.fromkeys(path for path in sources if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS))
+        sources = []
+        candidates = list(paths)
+        candidate_count = len(candidates)
+        check_total = max(1, candidate_count * 2)
+        for position, value in enumerate(candidates, 1):
+            if cancelled and cancelled():
+                raise InterruptedError("Import cancelled")
+            source = Path(value).resolve()
+            if source.is_file() and source.suffix.lower() in IMAGE_EXTENSIONS:
+                sources.append(source)
+            if progress_callback:
+                progress_callback(position, check_total, f"Checking image {position}/{candidate_count}: {source.name}")
+        sources = list(dict.fromkeys(sources))
         if not sources:
             raise ValueError("No supported images were provided")
         existing_paths = {path.resolve() for path in self.image_paths if path.exists()}
         existing_names = {path.name.casefold() for path in self.image_paths}
         next_id = max((int(item.get("id", 0)) for item in self.data.get("images", [])), default=0) + 1
         added_indices = []
-        for source in sources:
+        progress_total = candidate_count + len(sources)
+        if progress_callback:
+            progress_callback(candidate_count, progress_total, "Preparing images for import…")
+        for position, source in enumerate(sources, 1):
+            if cancelled and cancelled():
+                raise InterruptedError("Import cancelled")
             if source in existing_paths:
+                if progress_callback:
+                    progress_callback(candidate_count + position, progress_total, f"Skipping existing image {position}/{len(sources)}: {source.name}")
                 continue
             target = source
             if copy_into_project and source.parent != self.root:
@@ -168,6 +200,7 @@ class CocoProject:
                 shutil.copy2(source, target)
             elif target.name.casefold() in existing_names:
                 continue
+            prepare_image(target, cancelled=cancelled)
             with Image.open(target) as image:
                 width, height = image.size
                 image.verify()
@@ -179,6 +212,8 @@ class CocoProject:
             existing_names.add(target.name.casefold())
             added_indices.append(len(self.image_paths) - 1)
             next_id += 1
+            if progress_callback:
+                progress_callback(candidate_count + position, progress_total, f"Adding image {position}/{len(sources)}: {target.name}")
         if added_indices:
             self.dirty = True
         return added_indices
@@ -197,7 +232,7 @@ class CocoProject:
         self.dirty = True
         return len(valid), annotation_count
 
-    def open_json(self, json_path: Path) -> None:
+    def open_json(self, json_path: Path, progress_callback=None, cancelled=None) -> None:
         json_path = json_path.resolve()
         with json_path.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
@@ -214,12 +249,23 @@ class CocoProject:
             self.data["categories"] = [{"id": 1, "name": "particle", "supercategory": "particle"}]
         candidates = [self.root / "images", self.root]
         self.image_paths = []
-        for record in self.data["images"]:
+        count = len(self.data["images"])
+        for index, record in enumerate(self.data["images"], 1):
+            if cancelled and cancelled():
+                raise InterruptedError("Import cancelled")
             name = Path(str(record.get("file_name", "")).replace("\\", "/"))
             found = next((base / name for base in candidates if (base / name).is_file()), None)
             if found is None:
                 found = next((base / name.name for base in candidates if (base / name.name).is_file()), self.root / name)
             self.image_paths.append(found)
+            if progress_callback:
+                progress_callback(index, count * 2, f"Indexing project image {index}/{count}: {name.name}")
+        for index, image_path in enumerate(self.image_paths, 1):
+            if cancelled and cancelled():
+                raise InterruptedError("Import cancelled")
+            prepare_image(image_path, cancelled=cancelled)
+            if progress_callback:
+                progress_callback(count + index, count * 2, f"Preparing SAM3 image {index}/{count}: {image_path.name}")
         state = self.root / "project_state.json"
         if state.is_file():
             try:

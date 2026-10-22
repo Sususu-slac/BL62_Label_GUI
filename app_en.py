@@ -7,7 +7,6 @@ from pathlib import Path
 import json
 import sys
 
-from PIL import Image
 import numpy as np
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction
@@ -25,6 +24,7 @@ TRANSLATIONS = {
     "新建项目": "New Project", "导入已有项目": "Import Existing Project",
     "从项目移除": "Remove from Project",
     "保存 Ctrl+S": "Save  Ctrl+S", "上一张": "Previous", "下一张": "Next",
+    "重置": "Reset",
     "标为已审核": "Toggle Reviewed", "导出": "Export",
     "未打开项目": "No project open", "图片（✓ 已审核，● 有标注）": "Images  (✓ reviewed, ● annotated)",
     "SAM3 GPU 辅助标注": "SAM3 GPU-Assisted Annotation",
@@ -110,10 +110,10 @@ class MainWindow(ChineseMainWindow):
         if self.index>=0:self.commit_current()
         self.index=index; path=self.project.image_paths[index]
         try:
-            rgb=np.asarray(Image.open(path).convert("RGB")); rec=self.project.image_record(index)
+            image_data=self.image_cache.get(path); self.source_image=None; self.sam_rgb8=image_data.sam_rgb8; rgb=image_data.display_rgb8; rec=self.project.image_record(index)
             self.masks=self.project.masks_for(rec["id"],rgb.shape[1],rgb.shape[0]); self.undo_stack=[]; self.redo_stack=[]
             self.mask_prompt=None; self.mask_prompt_source=None; self.capture_mask_prompt=False; self.view.exemplar_mask=None; self.view.sam_box=None
-            self.view.set_image(rgb,self.masks); self.current_masks_dirty=False; self.mask_prompt_status.setText("Instance Prompt: not set"); self.update_roi_status(); self.update_run_button(); self.refresh_masks(); self.counter.setText(f"{index+1}/{len(self.project.image_paths)}  {path.name}")
+            self.view.set_image(rgb,self.masks); self.histogram.set_image(rgb,image_data.histogram,image_data.intensity_min,image_data.intensity_max); self.current_masks_dirty=False; self.mask_prompt_status.setText("Instance Prompt: not set"); self.update_roi_status(); self.update_run_button(); self.refresh_masks(); self.counter.setText(f"{index+1}/{len(self.project.image_paths)}  {path.name}")
         except Exception as exc:self.error(exc)
 
     def apply_labels_to_selected(self):
@@ -131,11 +131,11 @@ class MainWindow(ChineseMainWindow):
         else:self.project.reviewed.add(image_id)
         self.project.dirty=True; self.update_image_status(self.index); self.statusBar().showMessage("Review status updated; press Ctrl+S to save")
 
-    def save(self):
+    def save(self,show_confirmation=True):
         if self.project.json_path is None:return
         try:
             self.commit_current(force=True); self.project.save(); self.update_image_status(self.index); self.statusBar().showMessage(f"Saved: {self.project.json_path}",5000)
-            QMessageBox.information(self,"Save Complete",f"Saved to:\n{self.project.json_path}")
+            if show_confirmation:QMessageBox.information(self,"Save Complete",f"Saved to:\n{self.project.json_path}")
         except Exception as exc:self.error(exc)
 
     def load_sam3(self):

@@ -46,6 +46,10 @@ class BrushPerformanceTest(unittest.TestCase):
   window=EnglishMainWindow();window.project.json_path=Path('annotations.json');window.project.dirty=False
   with patch.object(window,'commit_current'),patch.object(window.project,'save'),patch('app_en.QMessageBox.information') as notice:window.save();notice.assert_called_once_with(window,'Save Complete','Saved to:\nannotations.json')
   window.project.dirty=False;window._stop_resident();window.close()
+ def test_import_autosave_does_not_show_save_confirmation(self):
+  window=MainWindow();window.project.json_path=Path('annotations.json');window.project.dirty=False
+  with patch.object(window,'commit_current'),patch.object(window.project,'save'),patch('app.QMessageBox.information') as notice:window.save(show_confirmation=False);notice.assert_not_called()
+  window.project.dirty=False;window._stop_resident();window.close()
  def test_sam_box_replacement_keeps_labels_outside_box(self):
   window=MainWindow();inside=np.zeros((100,100),bool);inside[20:30,20:30]=True;outside=np.zeros((100,100),bool);outside[70:80,70:80]=True
   window.masks=[{'mask':inside},{'mask':outside}];window.view.masks=window.masks;window._sam_replace_requested=True;window._sam_replace_box=(10,10,40,40);window._apply_pending_sam_replacement()

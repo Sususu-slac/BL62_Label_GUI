@@ -167,6 +167,15 @@ class BatchTest(unittest.TestCase):
         self.assertEqual(self.window._resident_load_count,1)
         self.assertTrue(self.window.release_sam_btn.isEnabled())
 
+    def test_rgb8_single_and_batch_requests_use_original_image_paths(self):
+        self.window.start_resident_single('particle');self.wait_idle()
+        requests=[json.loads(line) for line in (self.root/'requests.jsonl').read_text().splitlines()]
+        self.assertEqual(Path(requests[0]['image']),self.window.project.image_paths[0])
+        self.start('success');self.wait()
+        requests=[json.loads(line) for line in (self.root/'requests.jsonl').read_text().splitlines()]
+        self.assertEqual(Path(requests[1]['image']),self.window.project.image_paths[0])
+        self.assertEqual(Path(requests[2]['image']),self.window.project.image_paths[2])
+
     def test_release_and_next_run_reload(self):
         self.start('success');self.wait();old_pid=self.window._resident_process.processId()
         self.window.release_sam_btn.click()

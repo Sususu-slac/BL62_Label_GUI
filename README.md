@@ -34,7 +34,8 @@ Configuration is saved locally in `sam3_settings.json`, which is excluded from G
 - The ordinary Run button still asks to replace existing labels. Multi-image batch confirmation and replacement are unchanged.
 - Save and export the training dataset from the GUI.
 - Eraser edits that create interior holes are saved as COCO RLE masks, so holes stay open after switching images or reopening the project.
-- Adjust the image display with the histogram below the canvas; this changes only the view and leaves the source pixels and labels untouched.
+- The histogram uses the original image's grayscale range. Auto stretches the 0.1–99.9 percentile range, Reset restores the full image range, and the curve changes only the on-screen view. Previous and Next are available beside these controls.
+- Import prepares a reusable display preview, original-range histogram, and SAM3 input in the background, with progress shown for new projects, COCO projects, and added images. The cache is stored in a `.bl62_sam3_cache` folder beside the source images, keeping generated data on the dataset's drive. 8-bit images keep their original appearance and are passed directly to SAM3. 16-bit and 32-bit source files remain unchanged; their prepared display preview and RGB8 SAM3 image are reused when switching images.
 
 ## Development
 

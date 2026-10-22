@@ -110,8 +110,11 @@ class BatchSam3Mixin:
             self._finish_selected_batch()
             return
         row = self._batch_rows[position]
-        self._batch_dialog.setLabelText(f"{position+1}/{len(self._batch_rows)}: {self.project.image_paths[row].name}")
-        request = {"image": str(self.project.image_paths[row]),
+        image_path = self.project.image_paths[row]
+        self._batch_dialog.setLabelText(f"{position+1}/{len(self._batch_rows)}: {image_path.name}")
+        image_data = self.image_cache.get(image_path)
+        sam_image = str(image_data.sam_path)
+        request = {"image": sam_image,
             "output": str(Path(self._batch_temp.name)/"result.npz"),
             "prompt": self._batch_prompt, "confidence": self._batch_confidence,
             "mode": "text", "box": None}
