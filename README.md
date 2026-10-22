@@ -34,6 +34,7 @@ Configuration is saved locally in `sam3_settings.json`, which is excluded from G
 - The ordinary Run button still asks to replace existing labels. Multi-image batch confirmation and replacement are unchanged.
 - Save and export the training dataset from the GUI.
 - Eraser edits that create interior holes are saved as COCO RLE masks, so holes stay open after switching images or reopening the project.
+- Adjust the image display with the histogram below the canvas; this changes only the view and leaves the source pixels and labels untouched.
 
 ## Development
 

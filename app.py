@@ -25,6 +25,162 @@ from resident_sam3 import ResidentSam3Mixin
 
 COLORS = [(255,75,75),(57,189,248),(75,220,120),(255,196,65),(190,100,255),(255,105,190),(75,230,220)]
 
+
+def apply_display_range(array: np.ndarray, black: int, white: int) -> np.ndarray:
+    """Map an 8-bit image through a display window without changing its source pixels."""
+    low = max(0, min(254, int(black)))
+    high = max(low + 1, min(255, int(white)))
+    values = np.asarray(array, dtype=np.uint8)
+    if low == 0 and high == 255:
+        return values
+    scaled = (values.astype(np.float32) - low) * (255.0 / (high - low))
+    return np.clip(scaled, 0, 255).astype(np.uint8)
+
+
+class HistogramCanvas(QWidget):
+    rangeChanged = Signal(int, int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.histogram = np.zeros(256, dtype=np.int64)
+        self.black = 0
+        self.white = 255
+        self._drag_handle = None
+        self.setMinimumHeight(68)
+        self.setSizePolicy(self.sizePolicy().horizontalPolicy(), self.sizePolicy().verticalPolicy())
+        self.setToolTip("Drag the two handles to adjust the displayed intensity range")
+
+    def set_image(self, array: np.ndarray):
+        values = np.asarray(array)
+        if values.ndim == 3:
+            gray = cv2.cvtColor(np.asarray(values[..., :3], dtype=np.uint8), cv2.COLOR_RGB2GRAY)
+        else:
+            gray = np.asarray(values, dtype=np.uint8)
+        self.histogram = np.bincount(gray.ravel(), minlength=256)
+        self.update()
+
+    def set_range(self, black: int, white: int):
+        self.black, self.white = int(black), int(white)
+        self.update()
+
+    def _plot_bounds(self):
+        return 10.0, 7.0, max(1.0, float(self.width() - 20)), max(1.0, float(self.height() - 20))
+
+    def _value_x(self, value):
+        x, _, width, _ = self._plot_bounds()
+        return x + (float(value) / 255.0) * width
+
+    def _value_at_x(self, x):
+        left, _, width, _ = self._plot_bounds()
+        return max(0, min(255, int(round((x - left) * 255.0 / width))))
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        left, top, width, height = self._plot_bounds()
+        base = top + height
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#101824"))
+        painter.drawRoundedRect(0, 0, self.width(), self.height(), 6, 6)
+        peak = max(1.0, float(np.log1p(self.histogram.max())))
+        path = QPainterPath(QPointF(left, base))
+        for value, count in enumerate(self.histogram):
+            px = left + value * width / 255.0
+            py = base - float(np.log1p(count)) / peak * (height - 5.0)
+            path.lineTo(px, py)
+        path.lineTo(left + width, base)
+        path.closeSubpath()
+        painter.setBrush(QColor("#3d5970"))
+        painter.drawPath(path)
+        black_x, white_x = self._value_x(self.black), self._value_x(self.white)
+        painter.setBrush(QColor(4, 9, 15, 125))
+        painter.drawRect(left, top, max(0.0, black_x - left), height)
+        painter.drawRect(white_x, top, max(0.0, left + width - white_x), height)
+        painter.setPen(QPen(QColor("#16c79a"), 2))
+        painter.drawLine(QPointF(black_x, top), QPointF(black_x, base))
+        painter.setPen(QPen(QColor("#f4c95d"), 2))
+        painter.drawLine(QPointF(white_x, top), QPointF(white_x, base))
+        painter.setPen(QColor("#8392a8"))
+        painter.drawText(10, self.height() - 2, "0")
+        painter.drawText(self.width() - 30, self.height() - 2, "255")
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            return super().mousePressEvent(event)
+        x = event.position().x()
+        self._drag_handle = "black" if abs(x - self._value_x(self.black)) <= abs(x - self._value_x(self.white)) else "white"
+        self._move_handle(x)
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._drag_handle:
+            self._move_handle(event.position().x())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_handle = None
+        super().mouseReleaseEvent(event)
+
+    def _move_handle(self, x):
+        value = self._value_at_x(x)
+        if self._drag_handle == "black":
+            self.rangeChanged.emit(min(value, self.white - 1), self.white)
+        else:
+            self.rangeChanged.emit(self.black, max(value, self.black + 1))
+
+
+class HistogramPanel(QWidget):
+    rangeChanged = Signal(int, int)
+
+    def __init__(self, english=False, parent=None):
+        super().__init__(parent)
+        self.english = english
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(2, 2, 2, 0)
+        layout.setSpacing(3)
+        self.canvas = HistogramCanvas(self)
+        layout.addWidget(self.canvas, 1)
+        controls = QHBoxLayout()
+        controls.setContentsMargins(4, 0, 4, 0)
+        self.black_spin = QSpinBox(); self.black_spin.setRange(0, 254)
+        self.white_spin = QSpinBox(); self.white_spin.setRange(1, 255); self.white_spin.setValue(255)
+        self.reset_button = QPushButton("Reset" if english else "重置")
+        controls.addWidget(QLabel("Histogram" if english else "直方图"))
+        controls.addSpacing(8)
+        controls.addWidget(QLabel("Black" if english else "黑场")); controls.addWidget(self.black_spin)
+        controls.addSpacing(8)
+        controls.addWidget(QLabel("White" if english else "白场")); controls.addWidget(self.white_spin)
+        controls.addStretch(1); controls.addWidget(self.reset_button)
+        layout.addLayout(controls)
+        self.canvas.rangeChanged.connect(self.set_range)
+        self.black_spin.valueChanged.connect(self._spins_changed)
+        self.white_spin.valueChanged.connect(self._spins_changed)
+        self.reset_button.clicked.connect(self.reset_range)
+        self.setFixedHeight(116)
+
+    def set_image(self, array: np.ndarray):
+        self.canvas.set_image(array)
+        self.reset_range()
+
+    def set_range(self, black: int, white: int):
+        black = max(0, min(int(black), 254))
+        white = max(black + 1, min(int(white), 255))
+        self.black_spin.blockSignals(True); self.white_spin.blockSignals(True)
+        self.black_spin.setValue(black); self.white_spin.setValue(white)
+        self.black_spin.blockSignals(False); self.white_spin.blockSignals(False)
+        self.canvas.set_range(black, white)
+        self.rangeChanged.emit(black, white)
+
+    def _spins_changed(self, _value):
+        black = self.black_spin.value()
+        white = max(black + 1, self.white_spin.value())
+        self.set_range(black, white)
+
+    def reset_range(self):
+        self.set_range(0, 255)
+
 THEME_QSS = """
 QWidget {
     background: #0b1018;
@@ -126,6 +282,7 @@ class AnnotationView(QGraphicsView):
         self.mode = "idle"; self.brush_size = 20; self.polygon = []; self.preview = None; self.drawing = False
         self._middle_panning=False; self._middle_pan_pos=None
         self.sam_box = None; self.box_start = None
+        self.display_black = 0; self.display_white = 255
         self.exemplar_mask = None
         self._overlay_cache=None; self._overlay_signature=None; self._editing_background=None; self.overlay_item=None; self.active_overlay_item=None
         self._background_key=None; self._hit_map=None; self._hit_signature=None; self._bbox_cache={}
@@ -136,6 +293,7 @@ class AnnotationView(QGraphicsView):
 
     def set_image(self, array: np.ndarray, masks: list[dict]):
         self.scene().clear(); self.array = array; self.masks = masks; self.selected = -1; self.polygon = []; self.overlay_item=None; self.active_overlay_item=None
+        self.display_black = 0; self.display_white = 255
         self._overlay_cache=None; self._overlay_signature=None; self._editing_background=None; self._background_key=None
         self._hit_map=None; self._hit_signature=None; self._bbox_cache={}
         h,w=array.shape[:2]
@@ -144,10 +302,22 @@ class AnnotationView(QGraphicsView):
             if bbox and len(bbox)>=4 and not entry.get("_geometry_dirty",False):
                 x,y,bw,bh=[int(round(float(value))) for value in bbox[:4]]
                 self._bbox_cache[id(entry["mask"])]=(max(0,x),max(0,y),min(w,x+bw),min(h,y+bh)) if bw>0 and bh>0 else None
-        rgb = np.ascontiguousarray(array[..., :3]); h,w = rgb.shape[:2]
-        qimg = QImage(rgb.data, w, h, rgb.strides[0], QImage.Format_RGB888).copy()
-        self.image_item = self.scene().addPixmap(QPixmap.fromImage(qimg)); self.image_item.setZValue(0)
+        self.image_item = self.scene().addPixmap(QPixmap()); self.image_item.setZValue(0)
+        self._update_image_display()
         self.redraw(); self.fitInView(self.image_item, Qt.KeepAspectRatio)
+
+    def _update_image_display(self):
+        if self.array is None or self.image_item is None:
+            return
+        rgb = np.ascontiguousarray(apply_display_range(self.array[..., :3], self.display_black, self.display_white))
+        h, w = rgb.shape[:2]
+        qimg = QImage(rgb.data, w, h, rgb.strides[0], QImage.Format_RGB888).copy()
+        self.image_item.setPixmap(QPixmap.fromImage(qimg))
+
+    def set_display_range(self, black: int, white: int):
+        self.display_black = max(0, min(254, int(black)))
+        self.display_white = max(self.display_black + 1, min(255, int(white)))
+        self._update_image_display()
 
     def redraw(self):
         for item in list(self.scene().items()):
@@ -499,7 +669,7 @@ class ExportWorker(QObject):
 
 class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
     def __init__(self):
-        super().__init__(); self.ui_language=getattr(self,"ui_language","zh"); self.setWindowTitle("Particle Label GUI — 2026-08-25"); self.resize(1550,930); self.setStyleSheet(THEME_QSS)
+        super().__init__(); self.ui_language=getattr(self,"ui_language","zh"); self.setWindowTitle("Particle Label GUI — 2026-10-21"); self.resize(1550,930); self.setStyleSheet(THEME_QSS)
         icon_path=Path(__file__).with_name("BL62_Label.ico")
         if icon_path.is_file():self.setWindowIcon(QIcon(str(icon_path)))
         self.setAcceptDrops(True)
@@ -526,7 +696,9 @@ class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
         split=QSplitter(); layout.addWidget(split,1)
         left=QWidget(); ll=QVBoxLayout(left); ll.addWidget(QLabel("图片（✓ 已审核，● 有标注）")); self.images=QListWidget(); self.images.setSelectionMode(QAbstractItemView.ExtendedSelection); self.images.setContextMenuPolicy(Qt.CustomContextMenu); self.images.customContextMenuRequested.connect(self.show_image_context_menu); self.images.currentRowChanged.connect(self.load_image); ll.addWidget(self.images); split.addWidget(left)
         self.images.itemSelectionChanged.connect(self.update_run_button)
-        self.view=AnnotationView(); self.view.changed.connect(self.push_undo); self.view.changed.connect(self.mark_current_dirty); self.view.selection_requested.connect(self.select_mask); self.view.masks_changed.connect(self.refresh_masks); self.view.masks_changed.connect(self.mark_current_dirty); self.view.instance_finished.connect(self.on_instance_finished); self.view.small_mask_finished.connect(self.confirm_small_mask); self.view.tool_reset_requested.connect(self.reset_tool); self.view.box_changed.connect(self.update_roi_status); self.view.box_changed.connect(self.on_sam_box_finished); self.view.status.connect(self.statusBar().showMessage); split.addWidget(self.view)
+        center=QWidget(); center_layout=QVBoxLayout(center); center_layout.setContentsMargins(0,0,0,0); center_layout.setSpacing(3)
+        self.view=AnnotationView(); self.view.changed.connect(self.push_undo); self.view.changed.connect(self.mark_current_dirty); self.view.selection_requested.connect(self.select_mask); self.view.masks_changed.connect(self.refresh_masks); self.view.masks_changed.connect(self.mark_current_dirty); self.view.instance_finished.connect(self.on_instance_finished); self.view.small_mask_finished.connect(self.confirm_small_mask); self.view.tool_reset_requested.connect(self.reset_tool); self.view.box_changed.connect(self.update_roi_status); self.view.box_changed.connect(self.on_sam_box_finished); self.view.status.connect(self.statusBar().showMessage); center_layout.addWidget(self.view,1)
+        self.histogram=HistogramPanel(english=getattr(self,"ui_language","zh")=="en"); self.histogram.rangeChanged.connect(self.view.set_display_range); center_layout.addWidget(self.histogram); split.addWidget(center)
         right=QWidget(); rl=QVBoxLayout(right)
         rl.addWidget(QLabel("SAM3 GPU 辅助标注")); self.repo_label=QLabel(); self.repo_label.setWordWrap(True); rl.addWidget(self.repo_label)
         choose_repo=QPushButton("选择 SAM3 仓库"); choose_repo.clicked.connect(self.choose_sam_repo); rl.addWidget(choose_repo)
@@ -938,7 +1110,7 @@ class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
             rgb=np.asarray(Image.open(path).convert("RGB")); rec=self.project.image_record(index)
             self.masks=self.project.masks_for(rec["id"],rgb.shape[1],rgb.shape[0]); self.undo_stack=[]; self.redo_stack=[]
             self.mask_prompt=None; self.mask_prompt_source=None; self.capture_mask_prompt=False; self.view.exemplar_mask=None; self.view.sam_box=None
-            self.view.set_image(rgb,self.masks); self.current_masks_dirty=False; self.mask_prompt_status.setText("Mask Prompt：尚未设置"); self.update_roi_status(); self.update_run_button(); self.refresh_masks(); self.counter.setText(f"{index+1}/{len(self.project.image_paths)}  {path.name}")
+            self.view.set_image(rgb,self.masks); self.histogram.set_image(rgb); self.current_masks_dirty=False; self.mask_prompt_status.setText("Mask Prompt：尚未设置"); self.update_roi_status(); self.update_run_button(); self.refresh_masks(); self.counter.setText(f"{index+1}/{len(self.project.image_paths)}  {path.name}")
         except Exception as e:self.error(e)
     def navigate(self,delta):
         if self.images.count():self.images.setCurrentRow(max(0,min(self.images.count()-1,self.index+delta)))
