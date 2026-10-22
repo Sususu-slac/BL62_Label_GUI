@@ -33,6 +33,7 @@ Configuration is saved locally in `sam3_settings.json`, which is excluded from G
 - In Instance Prompt mode, **Use Selected Instance** freezes a copy of the example and activates the box tool. Keep drawing boxes anywhere in the same image; the example may be outside the box and survives deletion or editing of its original label. Results are clipped to the requested box. Clear/set the example to change it; switching images clears it.
 - The ordinary Run button still asks to replace existing labels. Multi-image batch confirmation and replacement are unchanged.
 - Save and export the training dataset from the GUI.
+- Eraser edits that create interior holes are saved as COCO RLE masks, so holes stay open after switching images or reopening the project.
 
 ## Development
 

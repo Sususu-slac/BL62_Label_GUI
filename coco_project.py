@@ -39,7 +39,10 @@ def polygons_to_mask(segmentation, width: int, height: int) -> np.ndarray:
     elif isinstance(segmentation, dict):
         try:
             from pycocotools import mask as mask_utils
-            decoded = mask_utils.decode(segmentation)
+            rle = dict(segmentation)
+            if isinstance(rle.get("counts"), str):
+                rle["counts"] = rle["counts"].encode("ascii")
+            decoded = mask_utils.decode(rle)
             mask = (decoded[..., 0] if decoded.ndim == 3 else decoded).astype(np.uint8)
         except Exception as exc:
             raise ValueError("RLE mask requires pycocotools") from exc
@@ -70,6 +73,27 @@ def mask_annotation_geometry(mask: np.ndarray) -> tuple[list[list[float]], list[
             if len(polygon) >= 6:
                 polygons.append(polygon)
     return polygons, [float(x), float(y), float(width), float(height)], float(len(points))
+
+
+def mask_annotation_data(mask: np.ndarray) -> tuple[list[list[float]] | dict, list[float], float]:
+    """Use COCO RLE for interior holes, which polygon segmentations cannot represent."""
+    bitmap = np.asarray(mask, dtype=np.uint8)
+    points = cv2.findNonZero(bitmap)
+    if points is None:
+        return [], [0.0, 0.0, 0.0, 0.0], 0.0
+    x, y, width, height = cv2.boundingRect(points)
+    crop = bitmap[y:y + height, x:x + width]
+    _, hierarchy = cv2.findContours(crop, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    has_holes = hierarchy is not None and any(parent >= 0 for (_, _, _, parent) in hierarchy[0])
+    bbox = [float(x), float(y), float(width), float(height)]
+    area = float(len(points))
+    if not has_holes:
+        polygons, _, _ = mask_annotation_geometry(bitmap)
+        return polygons, bbox, area
+    from pycocotools import mask as mask_utils
+    rle = mask_utils.encode(np.asfortranarray(bitmap))
+    rle["counts"] = rle["counts"].decode("ascii")
+    return rle, bbox, area
 
 
 class CocoProject:
@@ -287,20 +311,20 @@ class CocoProject:
         for item in masks:
             mask = item["mask"].astype(bool)
             if item.get("segmentation") and not item.get("_geometry_dirty", False):
-                polygons = copy.deepcopy(item["segmentation"])
+                segmentation = copy.deepcopy(item["segmentation"])
                 bbox = [float(value) for value in item.get("bbox", [0, 0, 0, 0])]
                 area = float(item.get("area", 0))
             else:
-                polygons, bbox, area = mask_annotation_geometry(mask)
-            if not polygons or area <= 0:
+                segmentation, bbox, area = mask_annotation_data(mask)
+            if not segmentation or area <= 0:
                 continue
-            item["segmentation"], item["bbox"], item["area"] = polygons, bbox, area
+            item["segmentation"], item["bbox"], item["area"] = segmentation, bbox, area
             item["_geometry_dirty"] = False
             ann_id = int(item.get("id", 0))
             if ann_id <= 0 or ann_id in used:
                 ann_id, next_id = next_id, next_id + 1
             used.add(ann_id)
-            saved_item = {"id": ann_id, "image_id": image_id, "category_id": int(item.get("category_id", 1)), "segmentation": polygons, "area": area, "bbox": bbox, "iscrowd": 0, "noun_phrase": item.get("noun_phrase", "particle"), "annotation_source": item.get("annotation_source", "manual")}
+            saved_item = {"id": ann_id, "image_id": image_id, "category_id": int(item.get("category_id", 1)), "segmentation": segmentation, "area": area, "bbox": bbox, "iscrowd": 0, "noun_phrase": item.get("noun_phrase", "particle"), "annotation_source": item.get("annotation_source", "manual")}
             if item.get("score") is not None:
                 saved_item["score"] = float(item["score"])
             if item.get("mask_prompt_source") is not None:
