@@ -18,6 +18,8 @@ SAM3 source code and model weights are not included. Obtain them from the offici
 
 Configuration is saved locally in `sam3_settings.json`, which is excluded from Git.
 
+On this workstation, the default checkpoint is `D:\Chcekpoints\checkpoint_demo_05142026.pt`. The application can still select another checkpoint from its settings.
+
 ## Project workflow
 
 - Create a project from a folder or selected images.
