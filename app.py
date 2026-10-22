@@ -935,7 +935,7 @@ class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
             self.statusBar().showMessage(("Small annotation deleted." if english else "小标注已删除。"),5000)
 
     def _setup_sam3(self):
-        defaults={"repo":r"D:\SAM3p1\sam3","checkpoint":r"D:\SAM3p1\checkpoint_sam3_format.pt"}
+        defaults={"repo":r"D:\SAM3p1\sam3","checkpoint":r"D:\Chcekpoints\checkpoint_demo_05142026.pt"}
         try: defaults.update(json.loads(self.settings_path.read_text(encoding="utf-8")))
         except Exception: pass
         self.sam_repo=defaults["repo"]; self.sam_checkpoint=defaults["checkpoint"]; self._update_sam_labels()
