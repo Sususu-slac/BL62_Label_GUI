@@ -60,7 +60,7 @@ class MainWindow(ChineseMainWindow):
     def __init__(self):
         self.ui_language="en"
         super().__init__()
-        self.setWindowTitle("Particle Label GUI — English — 2026-10-21")
+        self.setWindowTitle("Particle Label GUI — English — 2026-11-01")
         for widget in self.findChildren(QLabel) + self.findChildren(QPushButton):
             if widget.text() in TRANSLATIONS:
                 widget.setText(TRANSLATIONS[widget.text()])
@@ -281,4 +281,5 @@ class MainWindow(ChineseMainWindow):
 
 
 if __name__ == "__main__":
+    QApplication.setAttribute(Qt.AA_DontUseNativeDialogs,True)
     app=QApplication(sys.argv); app.setStyle("Fusion"); window=MainWindow(); window.show(); sys.exit(app.exec())

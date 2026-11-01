@@ -1,5 +1,16 @@
 # BL62 Label GUI
 
+## Light / Dark
+
+Use the upper-right **Switch to Light** / **Switch to Dark** button. Each GUI
+remembers its own choice; new installations default to Dark. Light uses blue
+buttons and selected controls, while Dark keeps the original green accents.
+Dialogs, menus, logs, charts and progress bars follow the theme. Images, masks,
+annotation edits, histogram settings, training state and chat drafts are preserved.
+
+See [theme validation](THEME_VALIDATION_20261101.md) for the checks and their scope.
+
+
 GPU-assisted image annotation with SAM3 and COCO dataset export.
 
 ## Windows installation
@@ -17,8 +28,6 @@ The installer creates the dedicated `BL62_Label_GUI` environment and does not mo
 SAM3 source code and model weights are not included. Obtain them from the official provider and comply with their license. A valid repository contains both `pyproject.toml` and `sam3/__init__.py`. A checkpoint must be a `.pt`, `.pth`, or `.ckpt` file larger than 100 MB.
 
 Configuration is saved locally in `sam3_settings.json`, which is excluded from Git.
-
-On this workstation, the default checkpoint is `D:\Chcekpoints\checkpoint_demo_05142026.pt`. The application can still select another checkpoint from its settings.
 
 ## Project workflow
 
@@ -55,3 +64,11 @@ conda run --no-capture-output -n BL62_Label_GUI python -m unittest discover -s t
 ```
 
 Do not commit checkpoints, datasets, annotations, exported results, or `sam3_settings.json`.
+
+## User manuals
+
+Latest English illustrated edition: **October 26, 2026**.
+
+- [PDF manual (25 pages)](docs/BL62_Label_GUI_User_Manual_10262026.pdf)
+- [Editable Word manual](docs/BL62_Label_GUI_User_Manual_10262026.docx)
+- [Documentation index](docs/README.md)

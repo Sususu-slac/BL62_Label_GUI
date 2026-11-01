@@ -23,6 +23,7 @@ from coco_project import CocoProject, mask_geometry
 from batch_sam3 import BatchSam3Mixin
 from resident_sam3 import ResidentSam3Mixin
 from image_data import ImageDataCache
+from bl62_theme import ThemeController,current_theme
 
 
 COLORS = [(255,75,75),(57,189,248),(75,220,120),(255,196,65),(190,100,255),(255,105,190),(75,230,220)]
@@ -136,11 +137,12 @@ class HistogramCanvas(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
+        light=current_theme(self)=='light'
         painter.setRenderHint(QPainter.Antialiasing)
         left, top, width, height = self._plot_bounds()
         base = top + height
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor("#101824"))
+        painter.setBrush(QColor("#ffffff" if light else "#101824"))
         painter.drawRoundedRect(0, 0, self.width(), self.height(), 6, 6)
         if self.has_image:
             peak = max(1.0, float(np.log1p(self.histogram.max())))
@@ -151,9 +153,9 @@ class HistogramCanvas(QWidget):
                 path.lineTo(px, py)
             path.lineTo(left + width, base)
             path.closeSubpath()
-            painter.setBrush(QColor("#3d5970"))
+            painter.setBrush(QColor("#bfcee0" if light else "#3d5970"))
             painter.drawPath(path)
-        painter.setPen(QPen(QColor("#526477"), 1, Qt.DashLine))
+        painter.setPen(QPen(QColor("#8b9caf" if light else "#526477"), 1, Qt.DashLine))
         painter.drawLine(QPointF(left, base), QPointF(left + width, top))
         curve_path = QPainterPath()
         for index, (x_value, y_value) in enumerate(self.points):
@@ -162,7 +164,7 @@ class HistogramCanvas(QWidget):
                 curve_path.moveTo(point)
             else:
                 curve_path.lineTo(point)
-        painter.setPen(QPen(QColor("#16c79a"), 2.5))
+        painter.setPen(QPen(QColor("#2563eb" if light else "#16c79a"), 2.5))
         painter.setBrush(Qt.NoBrush)
         painter.drawPath(curve_path)
         painter.setPen(QPen(QColor("#07111b"), 1))
@@ -170,7 +172,7 @@ class HistogramCanvas(QWidget):
             point = QPointF(self._value_x(x_value), base - (y_value / 255.0) * height)
             painter.setBrush(QColor("#f4c95d"))
             painter.drawEllipse(point, 4.5, 4.5)
-        painter.setPen(QColor("#8392a8"))
+        painter.setPen(QColor("#536476" if light else "#8392a8"))
         if self.has_image:
             painter.drawText(10, self.height() - 2, self._format_intensity(self.intensity_min))
             painter.drawText(self.width() - 58, self.height() - 2, self._format_intensity(self.intensity_max))
@@ -835,7 +837,7 @@ class ExportWorker(QObject):
 
 class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
     def __init__(self):
-        super().__init__(); self.ui_language=getattr(self,"ui_language","zh"); self.setWindowTitle("Particle Label GUI — 2026-10-22"); self.resize(1550,930); self.setStyleSheet(THEME_QSS)
+        super().__init__(); self.ui_language=getattr(self,"ui_language","zh"); self.setWindowTitle("Particle Label GUI — 2026-11-01"); self.resize(1550,930); self.setStyleSheet(THEME_QSS)
         icon_path=Path(__file__).with_name("BL62_Label.ico")
         if icon_path.is_file():self.setWindowIcon(QIcon(str(icon_path)))
         self.setAcceptDrops(True)
@@ -849,6 +851,7 @@ class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
         self.prompt_mode="text"; self.mask_prompt=None; self.mask_prompt_source=None; self.capture_mask_prompt=False
         self.settings_path=Path(__file__).with_name("sam3_settings.json")
         self._build(); self.statusBar().showMessage("新建文件夹/图片项目，或打开 COCO annotations.json；可拖拽图片加入当前项目")
+        self.theme_manager=ThemeController(self,self.theme_button,'Label',THEME_QSS,changed=lambda mode:self.histogram.canvas.update())
 
     def _build(self):
         toolbar=QToolBar("Tools"); self.addToolBar(toolbar)
@@ -862,6 +865,7 @@ class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
             b=QPushButton(text); b.clicked.connect(slot); top.addWidget(b)
             if text=="导出":self.export_btn=b
         top.addStretch(); self.counter=QLabel("未打开项目"); top.addWidget(self.counter)
+        self.theme_button=QPushButton('Switch to Light');top.addWidget(self.theme_button)
         split=QSplitter(); layout.addWidget(split,1)
         left=QWidget(); ll=QVBoxLayout(left); ll.addWidget(QLabel("图片（✓ 已审核，● 有标注）")); self.images=QListWidget(); self.images.setSelectionMode(QAbstractItemView.ExtendedSelection); self.images.setContextMenuPolicy(Qt.CustomContextMenu); self.images.customContextMenuRequested.connect(self.show_image_context_menu); self.images.currentRowChanged.connect(self.load_image); ll.addWidget(self.images); split.addWidget(left)
         self.images.itemSelectionChanged.connect(self.update_run_button)
@@ -1503,4 +1507,5 @@ class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
 
 
 if __name__=="__main__":
+    QApplication.setAttribute(Qt.AA_DontUseNativeDialogs,True)
     app=QApplication(sys.argv); app.setStyle("Fusion"); window=MainWindow(); window.show(); sys.exit(app.exec())

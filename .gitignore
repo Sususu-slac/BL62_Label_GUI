@@ -13,3 +13,25 @@ project_state.json
 *.incomplete
 .idea/
 .vscode/
+
+# Workstation state and large external inputs
+*.log
+*.pt
+*.pth
+*.ckpt
+*.gguf
+*.h5
+*.hdf5
+*.npy
+*.npz
+.env
+.env.*
+settings.json
+telegram.json
+conversations/
+outputs/
+backups/
+test_outputs/
+desktop_*/
+__pycache__/
+*.pyc
