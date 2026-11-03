@@ -837,7 +837,7 @@ class ExportWorker(QObject):
 
 class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
     def __init__(self):
-        super().__init__(); self.ui_language=getattr(self,"ui_language","zh"); self.setWindowTitle("Particle Label GUI — 2026-11-01"); self.resize(1550,930); self.setStyleSheet(THEME_QSS)
+        super().__init__(); self.ui_language=getattr(self,"ui_language","zh"); self.setWindowTitle("Particle Label GUI — 2026-11-02"); self.resize(1550,930); self.setStyleSheet(THEME_QSS)
         icon_path=Path(__file__).with_name("BL62_Label.ico")
         if icon_path.is_file():self.setWindowIcon(QIcon(str(icon_path)))
         self.setAcceptDrops(True)
@@ -849,7 +849,8 @@ class MainWindow(BatchSam3Mixin, ResidentSam3Mixin, QMainWindow):
         self._open_cancel_requested=False
         self.add_thread=None; self.add_worker=None; self.add_dialog=None
         self.prompt_mode="text"; self.mask_prompt=None; self.mask_prompt_source=None; self.capture_mask_prompt=False
-        self.settings_path=Path(__file__).with_name("sam3_settings.json")
+        self.settings_path=Path(os.environ.get("BL62_LABEL_SETTINGS", str(Path(__file__).with_name("sam3_settings.json"))))
+        self.settings_path.parent.mkdir(parents=True,exist_ok=True)
         self._build(); self.statusBar().showMessage("新建文件夹/图片项目，或打开 COCO annotations.json；可拖拽图片加入当前项目")
         self.theme_manager=ThemeController(self,self.theme_button,'Label',THEME_QSS,changed=lambda mode:self.histogram.canvas.update())
 

@@ -60,7 +60,7 @@ class MainWindow(ChineseMainWindow):
     def __init__(self):
         self.ui_language="en"
         super().__init__()
-        self.setWindowTitle("Particle Label GUI — English — 2026-11-01")
+        self.setWindowTitle("Particle Label GUI — English — 2026-11-02")
         for widget in self.findChildren(QLabel) + self.findChildren(QPushButton):
             if widget.text() in TRANSLATIONS:
                 widget.setText(TRANSLATIONS[widget.text()])

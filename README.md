@@ -72,3 +72,7 @@ Latest English illustrated edition: **October 26, 2026**.
 - [PDF manual (25 pages)](docs/BL62_Label_GUI_User_Manual_10262026.pdf)
 - [Editable Word manual](docs/BL62_Label_GUI_User_Manual_10262026.docx)
 - [Documentation index](docs/README.md)
+
+## Shared Windows accounts — 2026-11-02
+
+Set `BL62_LABEL_SETTINGS` to a JSON path in the current user profile when multiple Windows accounts share the same program folder. The parent directory is created automatically. Without the override, existing SAM3 settings remain compatible. This release retains the Light/Dark UI and all image/annotation behavior.
